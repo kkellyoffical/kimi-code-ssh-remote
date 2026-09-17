@@ -74,6 +74,36 @@ describe('ConnectionStore', () => {
     await expect(store.add({ name: 'ok', host: '' })).rejects.toThrow(SshRemoteError);
   });
 
+  it('rejects hosts and users starting with a dash (ssh option injection)', async () => {
+    const store = new ConnectionStore(makeHome());
+    await expect(store.add({ name: 'evil', host: '-oProxyCommand=evil' })).rejects.toThrow(
+      SshRemoteError,
+    );
+    await expect(
+      store.add({ name: 'evil2', host: 'dev.example.com', user: '-oProxyCommand=evil' }),
+    ).rejects.toThrow(SshRemoteError);
+    await expect(
+      store.add({ name: 'ok', host: 'dev.example.com', user: 'alice' }),
+    ).resolves.toMatchObject({ host: 'dev.example.com', user: 'alice' });
+  });
+
+  it('serializes concurrent writes', async () => {
+    const store = new ConnectionStore(makeHome());
+    await Promise.all([
+      store.add({ name: 'a', host: 'a.example.com' }),
+      store.add({ name: 'b', host: 'b.example.com' }),
+      store.add({ name: 'c', host: 'c.example.com' }),
+      store.add({ name: 'd', host: 'd.example.com' }),
+    ]);
+    const names = (await store.list()).map((profile) => profile.name).toSorted();
+    expect(names).toEqual(['a', 'b', 'c', 'd']);
+    await store.add({ name: 'x', host: 'x.example.com' });
+    await Promise.all([store.add({ name: 'y', host: 'y.example.com' }), store.remove('x')]);
+    await expect(store.list()).resolves.toHaveLength(5);
+    await expect(store.get('x')).resolves.toBeUndefined();
+    await expect(store.get('y')).resolves.toBeDefined();
+  });
+
   it('removes profiles and reports whether one existed', async () => {
     const store = new ConnectionStore(makeHome());
     await store.add({ name: 'devbox', host: 'dev.example.com' });

@@ -38,7 +38,12 @@ function scriptHealthyRemote(runner: FakeProcessRunner): void {
   runner.onRun(/server\.token/, () => ({ code: 0, stdout: 'tok-1\n', stderr: '' }));
 }
 
-function makeManager(runner: FakeProcessRunner, port = 49160, sleep?: (ms: number) => Promise<void>) {
+function makeManager(
+  runner: FakeProcessRunner,
+  port = 49160,
+  sleep?: (ms: number) => Promise<void>,
+  tunnelOverrides: Record<string, unknown> = {},
+) {
   let nextPort = port;
   return createSshConnectionManager({
     homeDir: makeHome(),
@@ -48,6 +53,7 @@ function makeManager(runner: FakeProcessRunner, port = 49160, sleep?: (ms: numbe
       probeLocalPort: async () => true,
       sleep: sleep ?? (async () => {}),
       reconnectBaseDelayMs: 1,
+      ...tunnelOverrides,
     },
     bootstrap: { sleep: async () => {}, pollIntervalMs: 1 },
   });
@@ -234,6 +240,28 @@ describe('SshConnectionManager', () => {
     expect(manager.status('two')).toEqual({ state: 'off' });
     await manager.close();
     await expect(manager.connect('one')).rejects.toThrow(/closed/);
+  });
+
+  it('clears localOrigin when the tunnel fails permanently', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    let probing = true;
+    const manager = makeManager(runner, 49160, undefined, {
+      probeLocalPort: async () => probing,
+      readyTimeoutMs: 0,
+      maxReconnectAttempts: 1,
+    });
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox');
+    expect(manager.status('devbox').localOrigin).toBeDefined();
+    probing = false;
+    runner.spawns[0]?.resolveExit({ code: 255, signal: null });
+    await vi.waitFor(() => {
+      expect(manager.status('devbox').state).toBe('error');
+    });
+    expect(manager.status('devbox').localOrigin).toBeUndefined();
+    expect(manager.status('devbox').error).toBeDefined();
+    await manager.close();
   });
 
   it('removing an active connection disconnects it first', async () => {

@@ -20,6 +20,8 @@ const storeFileSchema = z.object({
 });
 
 export class ConnectionStore {
+  private writeQueue: Promise<void> = Promise.resolve();
+
   constructor(readonly homeDir: string) {}
 
   get filePath(): string {
@@ -36,21 +38,39 @@ export class ConnectionStore {
 
   async add(input: SshConnectionProfileInput): Promise<SshConnectionProfile> {
     const profile = parseProfile(input);
-    const data = await this.readFile();
-    if (data.connections.some((existing) => existing.name === profile.name)) {
-      throw new SshRemoteError('config', `ssh connection "${profile.name}" already exists`);
-    }
-    data.connections.push(profile);
-    await this.writeFile(data);
-    return profile;
+    return this.withWriteLock(async () => {
+      const data = await this.readFile();
+      if (data.connections.some((existing) => existing.name === profile.name)) {
+        throw new SshRemoteError('config', `ssh connection "${profile.name}" already exists`);
+      }
+      data.connections.push(profile);
+      await this.writeFile(data);
+      return profile;
+    });
   }
 
   async remove(name: string): Promise<boolean> {
-    const data = await this.readFile();
-    const next = data.connections.filter((profile) => profile.name !== name);
-    if (next.length === data.connections.length) return false;
-    await this.writeFile({ version: 1, connections: next });
-    return true;
+    return this.withWriteLock(async () => {
+      const data = await this.readFile();
+      const next = data.connections.filter((profile) => profile.name !== name);
+      if (next.length === data.connections.length) return false;
+      await this.writeFile({ version: 1, connections: next });
+      return true;
+    });
+  }
+
+  private async withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeQueue;
+    let release = (): void => {};
+    this.writeQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private async readFile(): Promise<z.output<typeof storeFileSchema>> {

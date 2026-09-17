@@ -63,12 +63,16 @@ export async function bootstrapRemote(options: BootstrapOptions): Promise<Bootst
   } else {
     await startRemoteServer(client, kimiPath, probe.remoteHome, remotePort, log);
     serverStarted = true;
-    await waitFor(() => healthProbe(client, origin), {
-      timeoutMs: readyTimeoutMs,
-      intervalMs: pollIntervalMs,
-      sleep,
-      description: `remote kimi web to listen on ${origin} (see ${probe.remoteHome}/logs/web.log on the remote)`,
-    });
+    if (probe.httpClientAvailable) {
+      await waitFor(async () => (await healthProbe(client, origin)) === 'up', {
+        timeoutMs: readyTimeoutMs,
+        intervalMs: pollIntervalMs,
+        sleep,
+        description: `remote kimi web to listen on ${origin} (see ${probe.remoteHome}/logs/web.log on the remote)`,
+      });
+    } else {
+      log('no curl or wget on the remote; waiting for the server token instead of the health endpoint');
+    }
   }
 
   const token = await readRemoteToken(client, probe.remoteHome, {
@@ -92,6 +96,7 @@ export interface RemoteProbeResult {
   readonly remoteHome: string;
   readonly kimiPath?: string;
   readonly serverRunning: boolean;
+  readonly httpClientAvailable: boolean;
 }
 
 export async function probeRemote(
@@ -100,7 +105,7 @@ export async function probeRemote(
 ): Promise<RemoteProbeResult> {
   const platform = await detectPlatform(client);
   const probe = await probeRemoteKimi(client);
-  const serverRunning = await healthProbe(
+  const health = await healthProbe(
     client,
     `http://${REMOTE_SERVER_HOST}:${options?.remotePort ?? DEFAULT_REMOTE_SERVER_PORT}`,
   );
@@ -108,7 +113,8 @@ export async function probeRemote(
     platform,
     remoteHome: probe.remoteHome,
     kimiPath: probe.kimiPath,
-    serverRunning,
+    serverRunning: health === 'up',
+    httpClientAvailable: health !== 'no-client',
   };
 }
 
@@ -176,18 +182,28 @@ async function installRemoteKimi(
   const uploadPath = `${remoteBinDir}/.kimi-upload-${randomBytes(6).toString('hex')}`;
   log(`installing kimi on the remote from ${localBinary}`);
   await client.execOrThrow(`mkdir -p ${shQuote(remoteBinDir)}`, { timeoutMs: 15_000 });
-  await client.upload(localBinary, uploadPath);
-  await client.execOrThrow(
-    `chmod 755 ${shQuote(uploadPath)} && mv ${shQuote(uploadPath)} ${shQuote(remoteKimi)}`,
-    { timeoutMs: 30_000 },
-  );
+  try {
+    await client.upload(localBinary, uploadPath);
+    await client.execOrThrow(
+      `chmod 755 ${shQuote(uploadPath)} && mv ${shQuote(uploadPath)} ${shQuote(remoteKimi)}`,
+      { timeoutMs: 30_000 },
+    );
+  } catch (error) {
+    await client.exec(`rm -f ${shQuote(uploadPath)}`, { timeoutMs: 15_000 }).catch(() => {});
+    throw error;
+  }
   return remoteKimi;
 }
 
-async function healthProbe(client: SshClient, origin: string): Promise<boolean> {
-  const command = `curl -sf -o /dev/null --max-time 3 ${shQuote(`${origin}/api/v1/healthz`)} 2>/dev/null || wget -q -O /dev/null -T 3 ${shQuote(`${origin}/api/v1/healthz`)} 2>/dev/null`;
+export type HealthProbeResult = 'up' | 'down' | 'no-client';
+
+async function healthProbe(client: SshClient, origin: string): Promise<HealthProbeResult> {
+  const url = shQuote(`${origin}/api/v1/healthz`);
+  const command = `if command -v curl >/dev/null 2>&1; then curl -sf -o /dev/null --max-time 3 ${url}; elif command -v wget >/dev/null 2>&1; then wget -q -O /dev/null -T 3 ${url}; else exit 111; fi`;
   const result = await client.exec(command, { timeoutMs: 10_000 });
-  return result.code === 0;
+  if (result.code === 0) return 'up';
+  if (result.code === 111) return 'no-client';
+  return 'down';
 }
 
 async function startRemoteServer(

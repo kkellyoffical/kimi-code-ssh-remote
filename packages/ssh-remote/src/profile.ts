@@ -5,6 +5,8 @@ import { z } from 'zod';
 
 export const DEFAULT_SSH_PORT = 22;
 
+const noLeadingDash = (value: string): boolean => !value.startsWith('-');
+
 export const sshConnectionProfileSchema = z.object({
   name: z
     .string()
@@ -12,8 +14,15 @@ export const sshConnectionProfileSchema = z.object({
       /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
       'connection name must start with a letter or digit and contain only letters, digits, dot, underscore, or dash',
     ),
-  host: z.string().min(1, 'host is required'),
-  user: z.string().min(1).optional(),
+  host: z
+    .string()
+    .min(1, 'host is required')
+    .refine(noLeadingDash, 'host must not start with "-" or it would be parsed as an ssh option'),
+  user: z
+    .string()
+    .min(1)
+    .refine(noLeadingDash, 'user must not start with "-" or it would be parsed as an ssh option')
+    .optional(),
   port: z.number().int().min(1).max(65535).default(DEFAULT_SSH_PORT),
   identityFile: z.string().min(1).optional(),
 });

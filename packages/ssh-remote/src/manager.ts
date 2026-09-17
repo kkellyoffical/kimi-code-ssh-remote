@@ -121,6 +121,7 @@ export function createSshConnectionManager(
     } else if (state === 'failed') {
       entry.state = 'error';
       entry.error = lastError ?? 'ssh tunnel failed';
+      entry.handle = undefined;
     } else if (state === 'stopped' && entry.state !== 'error') {
       entry.state = 'off';
       entry.handle = undefined;

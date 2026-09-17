@@ -213,6 +213,60 @@ describe('bootstrapRemote', () => {
     }
   });
 
+  it('removes the partial upload when installation fails', async () => {
+    const runner = new FakeProcessRunner();
+    runner.onRun(/uname -s && uname -m/, () => ({
+      code: 0,
+      stdout: 'Linux\nx86_64\n',
+      stderr: '',
+    }));
+    runner.onRun(/command -v kimi/, () => ({
+      code: 0,
+      stdout: '/home/alice/.kimi-code\n',
+      stderr: '',
+    }));
+    runner.onRun(/^scp /, () => ({ code: 1, stdout: '', stderr: 'connection lost' }));
+    await expect(
+      bootstrapRemote({
+        client: makeClient(runner),
+        resolveLocalBinary: () => '/local/kimi-linux-x64',
+        sleep: noSleep,
+      }),
+    ).rejects.toThrow(/cannot upload/);
+    const cleanup = runner.runs.find((run) => /rm -f .*\.kimi-upload-/.test(remoteCommand(run)));
+    expect(cleanup).toBeDefined();
+  });
+
+  it('falls back to token-based readiness when the remote has no curl or wget', async () => {
+    const runner = new FakeProcessRunner();
+    runner.onRun(/uname -s && uname -m/, () => ({
+      code: 0,
+      stdout: 'Linux\nx86_64\n',
+      stderr: '',
+    }));
+    runner.onRun(/command -v kimi/, () => ({
+      code: 0,
+      stdout: '/home/alice/.kimi-code\n/usr/bin/kimi\n',
+      stderr: '',
+    }));
+    runner.onRun(/curl -sf/, () => ({ code: 111, stdout: '', stderr: '' }));
+    runner.onRun(/nohup/, () => ({ code: 0, stdout: '77\n', stderr: '' }));
+    runner.onRun(/server\.token/, () => ({ code: 0, stdout: 'tok-nocurl\n', stderr: '' }));
+    const logs: string[] = [];
+    const result = await bootstrapRemote({
+      client: makeClient(runner),
+      sleep: noSleep,
+      pollIntervalMs: 1,
+      readyTimeoutMs: 5,
+      logger: (line) => {
+        logs.push(line);
+      },
+    });
+    expect(result.serverStarted).toBe(true);
+    expect(result.token).toBe('tok-nocurl');
+    expect(logs.some((line) => line.includes('no curl or wget'))).toBe(true);
+  });
+
   it('times out when the token never appears', async () => {
     const runner = new FakeProcessRunner();
     scriptHealthyRemote(runner);
