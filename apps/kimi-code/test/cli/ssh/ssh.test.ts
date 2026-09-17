@@ -4,17 +4,21 @@
  * No real server, registry, or ssh binary is involved: handlers run against
  * injected deps (fake REST backend / fake manager), the REST client runs
  * against a fake fetch, and local-mode add/list/remove use a real
- * `createSshConnectionManager` pointed at a temp home (those operations never
- * spawn ssh).
+ * `createSshConnectionManager` pointed at a temp home with a fake process
+ * runner (the post-add auto-test would otherwise spawn ssh).
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 
 import type { ServerInstanceInfo } from '@moonshot-ai/kap-server';
 import {
+  createSshConnectionManager,
   SshRemoteError,
+  type ProcessRunner,
+  type SshAuthOptions,
   type SshConnectionHandle,
   type SshConnectionInfo,
   type SshConnectionManager,
@@ -25,22 +29,31 @@ import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { registerSshCommand } from '#/cli/sub/ssh';
-import { createSshRestClient, SshApiError, type SshBackend } from '#/cli/sub/ssh/client';
+import {
+  createSshRestClient,
+  SSH_AUTH_REQUIRED_CODE,
+  SshApiError,
+  type SshBackend,
+} from '#/cli/sub/ssh/client';
 import {
   buildSshDirectUrl,
   buildSshManageUrl,
   buildSshProxyUrl,
+  formatAuthMethod,
   formatConnectionTable,
+  formatNeedsPasswordError,
   sshErrorHint,
 } from '#/cli/sub/ssh/format';
 import {
   handleSshAdd,
   handleSshConnect,
   handleSshList,
+  handleSshPasswd,
   handleSshRemove,
   handleSshTest,
   type SshCommandDeps,
 } from '#/cli/sub/ssh/run';
+import { readSecretLine } from '#/cli/sub/ssh/secret-prompt';
 
 function stripAnsi(text: string): string {
   return text.replaceAll(/\u001B\[[0-9;]*m/g, '');
@@ -81,8 +94,25 @@ const LIVE_SERVER: ServerInstanceInfo = {
   heartbeatAt: 0,
 };
 
+function fakeBackend(overrides: Partial<SshBackend> = {}): SshBackend {
+  return {
+    list: async () => [],
+    add: async () => {
+      throw new Error('unexpected add');
+    },
+    remove: async () => {},
+    test: async () => ({ ok: true }) satisfies SshTestResult,
+    connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
+    setPassword: async () => {},
+    clearPassword: async () => {},
+    ...overrides,
+  };
+}
+
 interface DepOverrides extends Partial<SshCommandDeps> {
   backend?: SshBackend;
+  secretAnswers?: string[];
+  confirmAnswers?: boolean[];
 }
 
 function makeDeps(overrides: DepOverrides = {}): {
@@ -91,21 +121,15 @@ function makeDeps(overrides: DepOverrides = {}): {
   opened: string[];
   backend: SshBackend;
   prompts: string[];
+  secrets: string[];
+  confirms: string[];
 } {
   const io = makeIo();
   const opened: string[] = [];
   const prompts: string[] = [];
-  const backend =
-    overrides.backend ??
-    ({
-      list: async () => [],
-      add: async () => {
-        throw new Error('unexpected add');
-      },
-      remove: async () => {},
-      test: async () => ({ ok: true }) satisfies SshTestResult,
-      connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-    }) satisfies SshBackend;
+  const secrets: string[] = [];
+  const confirms: string[] = [];
+  const backend = overrides.backend ?? fakeBackend();
   const deps: SshCommandDeps = {
     homeDir: '/tmp/kimi-ssh-test-home',
     getLiveServer: async () => undefined,
@@ -119,13 +143,21 @@ function makeDeps(overrides: DepOverrides = {}): {
       prompts.push(question);
       return '';
     },
+    promptSecret: async (question) => {
+      secrets.push(question);
+      return overrides.secretAnswers?.shift() ?? '';
+    },
+    confirm: async (question) => {
+      confirms.push(question);
+      return overrides.confirmAnswers?.shift() ?? false;
+    },
     isInteractive: () => false,
     holdForeground: async () => {},
     stdout: io.stdout,
     stderr: io.stderr,
     ...overrides,
   };
-  return { deps, io, opened, backend, prompts };
+  return { deps, io, opened, backend, prompts, secrets, confirms };
 }
 
 describe('kimi ssh command wiring', () => {
@@ -138,31 +170,41 @@ describe('kimi ssh command wiring', () => {
       'add',
       'connect',
       'list',
+      'passwd',
       'remove',
       'test',
     ]);
   });
 
-  it('exposes the documented options on add and connect', () => {
+  it('exposes the documented options on add, passwd, test, and connect', () => {
     const program = new Command('kimi').exitOverride();
     registerSshCommand(program);
     const ssh = program.commands.find((command) => command.name() === 'ssh');
     const add = ssh?.commands.find((command) => command.name() === 'add');
+    const passwd = ssh?.commands.find((command) => command.name() === 'passwd');
+    const test = ssh?.commands.find((command) => command.name() === 'test');
     const connect = ssh?.commands.find((command) => command.name() === 'connect');
     expect(add?.options.map((option) => option.long)).toEqual([
       '--user',
       '--port',
       '--identity-file',
+      '--password',
+      '--save-password',
     ]);
-    expect(connect?.options.map((option) => option.long)).toEqual(['--direct', '--no-open']);
+    expect(passwd?.options.map((option) => option.long)).toEqual(['--clear']);
+    expect(test?.options.map((option) => option.long)).toEqual(['--password']);
+    expect(connect?.options.map((option) => option.long)).toEqual([
+      '--direct',
+      '--no-open',
+      '--password',
+    ]);
   });
 });
 
 describe('kimi ssh add', () => {
   it('saves a connection through the REST backend when a server is live', async () => {
     const added: unknown[] = [];
-    const backend: SshBackend = {
-      list: async () => [],
+    const backend = fakeBackend({
       add: async (spec) => {
         added.push(spec);
         return {
@@ -174,10 +216,7 @@ describe('kimi ssh add', () => {
           status: { state: 'off' },
         };
       },
-      remove: async () => {},
-      test: async () => ({ ok: true }),
-      connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-    };
+    });
     const { deps, io } = makeDeps({
       backend,
       getLiveServer: async () => LIVE_SERVER,
@@ -188,14 +227,118 @@ describe('kimi ssh add', () => {
     ]);
     const out = io.readStdout();
     expect(out).toContain('Saved ssh connection "prod" (ubuntu@example.com:2222)');
-    expect(out).toContain('kimi ssh test prod');
+    expect(out).toContain('Authentication: OK (public key)');
     expect(out).toContain('kimi ssh connect prod');
+  });
+
+  it('auto-tests after saving and reports a needs-password status', async () => {
+    const backend = fakeBackend({
+      add: async (spec) => ({
+        name: spec.name,
+        host: spec.host,
+        port: spec.port ?? 22,
+        status: { state: 'off' },
+      }),
+      test: async () => ({
+        ok: false,
+        needsPassword: true,
+        error: 'Permission denied (publickey,password).',
+      }),
+    });
+    const { deps, io } = makeDeps({ backend });
+    await handleSshAdd({ name: 'prod', target: 'example.com' }, deps);
+    const out = io.readStdout();
+    expect(out).toContain('Saved ssh connection "prod"');
+    expect(out).toContain('password required');
+    expect(out).toContain('kimi ssh passwd prod');
+    expect(out).toContain('kimi ssh test prod');
+  });
+
+  it('reports a plain probe failure when the auto-test fails before auth', async () => {
+    const backend = fakeBackend({
+      add: async (spec) => ({
+        name: spec.name,
+        host: spec.host,
+        port: spec.port ?? 22,
+        status: { state: 'off' },
+      }),
+      test: async () => ({ ok: false, error: 'ssh: Could not resolve hostname nope.internal' }),
+    });
+    const { deps, io } = makeDeps({ backend });
+    await handleSshAdd({ name: 'prod', target: 'nope.internal' }, deps);
+    const out = io.readStdout();
+    expect(out).toContain('Connection test: failed');
+    expect(out).toContain('check the host name and your network');
+    expect(out).not.toContain('Authentication: failed');
+  });
+
+  it('rejects --save-password without --password', async () => {
+    const { deps } = makeDeps();
+    await expect(
+      handleSshAdd({ name: 'prod', target: 'example.com', savePassword: true }, deps),
+    ).rejects.toThrow(/--save-password requires --password/);
+  });
+
+  it('rejects --password when not interactive', async () => {
+    const { deps } = makeDeps();
+    await expect(
+      handleSshAdd({ name: 'prod', target: 'example.com', password: true }, deps),
+    ).rejects.toThrow(/interactive terminal/);
+  });
+
+  it('prompts (hidden) for --password and tests with the password', async () => {
+    const tests: (SshAuthOptions | undefined)[] = [];
+    const backend = fakeBackend({
+      add: async (spec) => ({
+        name: spec.name,
+        host: spec.host,
+        user: spec.user,
+        port: spec.port ?? 22,
+        status: { state: 'off' },
+      }),
+      test: async (_name, auth) => {
+        tests.push(auth);
+        return { ok: true, platform: 'linux-x64' };
+      },
+    });
+    const { deps, io, secrets } = makeDeps({
+      backend,
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+      confirmAnswers: [true],
+    });
+    await handleSshAdd(
+      { name: 'prod', target: 'ubuntu@example.com', password: true, savePassword: true },
+      deps,
+    );
+    expect(secrets).toEqual(['Password for ubuntu@example.com: ']);
+    expect(tests).toEqual([{ password: 's3cret', savePassword: true }]);
+    expect(io.readStdout()).toContain('Authentication: OK (password, saved)');
+  });
+
+  it('notes when an entered password is verified but not saved', async () => {
+    const backend = fakeBackend({
+      add: async (spec) => ({
+        name: spec.name,
+        host: spec.host,
+        port: spec.port ?? 22,
+        status: { state: 'off' },
+      }),
+      test: async () => ({ ok: true }),
+    });
+    const { deps, io } = makeDeps({
+      backend,
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+      confirmAnswers: [false],
+    });
+    await handleSshAdd({ name: 'prod', target: 'example.com', password: true }, deps);
+    expect(io.readStdout()).toContain('Authentication: OK (password, not saved');
   });
 
   it('prefers --user over the user part of the target', async () => {
     const added: unknown[] = [];
-    const backend: SshBackend = {
-      list: async () => [],
+    const backend = fakeBackend({
       add: async (spec) => {
         added.push(spec);
         return {
@@ -207,10 +350,7 @@ describe('kimi ssh add', () => {
           status: { state: 'off' },
         };
       },
-      remove: async () => {},
-      test: async () => ({ ok: true }),
-      connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-    };
+    });
     const { deps } = makeDeps({ backend });
     await handleSshAdd({ name: 'prod', target: 'ubuntu@example.com', user: 'root' }, deps);
     expect(added).toEqual([
@@ -221,8 +361,7 @@ describe('kimi ssh add', () => {
   it('prompts for missing fields when interactive and no target is given', async () => {
     const answers = ['example.com', 'ubuntu', '2222', '~/.ssh/id_ed25519'];
     const added: unknown[] = [];
-    const backend: SshBackend = {
-      list: async () => [],
+    const backend = fakeBackend({
       add: async (spec) => {
         added.push(spec);
         return {
@@ -234,10 +373,7 @@ describe('kimi ssh add', () => {
           status: { state: 'off' },
         };
       },
-      remove: async () => {},
-      test: async () => ({ ok: true }),
-      connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-    };
+    });
     const { deps, prompts } = makeDeps({
       backend,
       isInteractive: () => true,
@@ -282,6 +418,7 @@ describe('kimi ssh list', () => {
       user: 'ubuntu',
       port: 22,
       identityFile: undefined,
+      hasPassword: undefined,
       status: { state: 'on', localOrigin: 'http://127.0.0.1:49001', error: undefined },
     },
     {
@@ -290,6 +427,7 @@ describe('kimi ssh list', () => {
       user: undefined,
       port: 2222,
       identityFile: '~/.ssh/id_ed25519',
+      hasPassword: undefined,
       status: { state: 'error', localOrigin: undefined, error: 'permission denied' },
     },
     {
@@ -298,43 +436,36 @@ describe('kimi ssh list', () => {
       user: undefined,
       port: 22,
       identityFile: undefined,
+      hasPassword: true,
       status: { state: 'off', localOrigin: undefined, error: undefined },
     },
   ];
 
-  it('renders an aligned table with live status from the REST backend', async () => {
+  it('renders an aligned table with auth methods and live status', async () => {
     const { deps, io } = makeDeps({
-      backend: {
-        list: async () => connections,
-        add: async () => connections[0]!,
-        remove: async () => {},
-        test: async () => ({ ok: true }),
-        connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-      },
+      backend: fakeBackend({ list: async () => connections }),
       getLiveServer: async () => LIVE_SERVER,
     });
     await handleSshList(deps);
     const out = io.readStdout();
     expect(out).toContain('NAME');
     expect(out).toContain('TARGET');
+    expect(out).toContain('AUTH');
     expect(out).toContain('prod');
     expect(out).toContain('ubuntu@example.com');
     expect(out).toContain('connected');
     expect(out).toContain('http://127.0.0.1:49001');
     expect(out).toContain('staging.internal:2222');
     expect(out).toContain('permission denied');
+    expect(out).toContain('agent');
+    expect(out).toContain('key');
+    expect(out).toContain('password (saved)');
     expect(out).not.toContain('local registry only');
   });
 
   it('notes the local-only registry when no server is running', async () => {
     const { deps, io } = makeDeps({
-      backend: {
-        list: async () => connections,
-        add: async () => connections[0]!,
-        remove: async () => {},
-        test: async () => ({ ok: true }),
-        connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-      },
+      backend: fakeBackend({ list: async () => connections }),
     });
     await handleSshList(deps);
     expect(io.readStdout()).toContain('local registry only');
@@ -373,21 +504,26 @@ describe('kimi ssh list', () => {
   });
 });
 
+describe('formatAuthMethod', () => {
+  it('derives the auth label from the identity file and saved-password marker', () => {
+    expect(formatAuthMethod({})).toBe('agent');
+    expect(formatAuthMethod({ identityFile: '~/.ssh/id_ed25519' })).toBe('key');
+    expect(formatAuthMethod({ hasPassword: true })).toBe('password (saved)');
+    expect(formatAuthMethod({ identityFile: '~/.ssh/id_ed25519', hasPassword: true })).toBe(
+      'key + password (saved)',
+    );
+  });
+});
+
 describe('kimi ssh remove', () => {
   it('removes through the backend and confirms', async () => {
     const removed: string[] = [];
     const { deps, io } = makeDeps({
-      backend: {
-        list: async () => [],
-        add: async () => {
-          throw new Error('unexpected');
-        },
+      backend: fakeBackend({
         remove: async (name) => {
           removed.push(name);
         },
-        test: async () => ({ ok: true }),
-        connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-      },
+      }),
     });
     await handleSshRemove({ name: 'prod' }, deps);
     expect(removed).toEqual(['prod']);
@@ -395,23 +531,66 @@ describe('kimi ssh remove', () => {
   });
 });
 
+describe('kimi ssh passwd', () => {
+  it('saves a password entered via the hidden prompt', async () => {
+    const saved: [string, string][] = [];
+    const { deps, io, secrets } = makeDeps({
+      backend: fakeBackend({
+        setPassword: async (name, password) => {
+          saved.push([name, password]);
+        },
+      }),
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+    });
+    await handleSshPasswd({ name: 'prod' }, deps);
+    expect(saved).toEqual([['prod', 's3cret']]);
+    expect(secrets).toEqual(['Password for prod: ']);
+    const out = io.readStdout();
+    expect(out).toContain('Saved the password for ssh connection "prod"');
+    expect(out).toContain(join('/tmp/kimi-ssh-test-home', 'ssh', 'secrets.json'));
+    expect(out).toContain('kimi ssh test prod');
+  });
+
+  it('rejects setting a password when not interactive', async () => {
+    const { deps } = makeDeps();
+    await expect(handleSshPasswd({ name: 'prod' }, deps)).rejects.toThrow(/interactive terminal/);
+  });
+
+  it('rejects an empty password entry', async () => {
+    const { deps } = makeDeps({
+      isInteractive: () => true,
+      secretAnswers: [''],
+    });
+    await expect(handleSshPasswd({ name: 'prod' }, deps)).rejects.toThrow(/no password entered/);
+  });
+
+  it('clears the saved password with --clear', async () => {
+    const cleared: string[] = [];
+    const { deps, io } = makeDeps({
+      backend: fakeBackend({
+        clearPassword: async (name) => {
+          cleared.push(name);
+        },
+      }),
+    });
+    await handleSshPasswd({ name: 'prod', clear: true }, deps);
+    expect(cleared).toEqual(['prod']);
+    expect(io.readStdout()).toContain('Cleared the saved password for ssh connection "prod".');
+  });
+});
+
 describe('kimi ssh test', () => {
   it('prints the remote bootstrap state on success', async () => {
     const { deps, io } = makeDeps({
-      backend: {
-        list: async () => [],
-        add: async () => {
-          throw new Error('unexpected');
-        },
-        remove: async () => {},
+      backend: fakeBackend({
         test: async () => ({
           ok: true,
           platform: 'linux-x64',
           kimiPath: '/home/ubuntu/.kimi-code/bin/kimi',
           serverRunning: false,
         }),
-        connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-      },
+      }),
     });
     await handleSshTest({ name: 'prod' }, deps);
     const out = io.readStdout();
@@ -423,15 +602,9 @@ describe('kimi ssh test', () => {
 
   it('fails with an actionable auth hint on permission errors', async () => {
     const { deps, io } = makeDeps({
-      backend: {
-        list: async () => [],
-        add: async () => {
-          throw new Error('unexpected');
-        },
-        remove: async () => {},
+      backend: fakeBackend({
         test: async () => ({ ok: false, error: 'ssh exited 255: Permission denied (publickey)' }),
-        connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-      },
+      }),
     });
     await expect(handleSshTest({ name: 'prod' }, deps)).rejects.toThrow(/test failed/);
     const out = io.readStdout();
@@ -442,18 +615,91 @@ describe('kimi ssh test', () => {
 
   it('fails with a network hint on unreachable hosts', async () => {
     const { deps, io } = makeDeps({
-      backend: {
-        list: async () => [],
-        add: async () => {
-          throw new Error('unexpected');
-        },
-        remove: async () => {},
+      backend: fakeBackend({
         test: async () => ({ ok: false, error: 'ssh: Could not resolve hostname nope.internal' }),
-        connect: async () => ({ localOrigin: 'http://127.0.0.1:49001' }),
-      },
+      }),
     });
     await expect(handleSshTest({ name: 'prod' }, deps)).rejects.toThrow(/test failed/);
     expect(io.readStdout()).toContain('check the host name and your network');
+  });
+
+  it('prompts (hidden) and retries once when the probe needs a password', async () => {
+    const auths: (SshAuthOptions | undefined)[] = [];
+    const results: SshTestResult[] = [
+      { ok: false, needsPassword: true, error: 'Permission denied (publickey,password).' },
+      { ok: true, platform: 'linux-x64' },
+    ];
+    const { deps, io, secrets, confirms } = makeDeps({
+      backend: fakeBackend({
+        test: async (_name, auth) => {
+          auths.push(auth);
+          return results.shift() ?? { ok: false, error: 'unexpected extra attempt' };
+        },
+      }),
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+      confirmAnswers: [true],
+    });
+    await handleSshTest({ name: 'prod' }, deps);
+    expect(auths).toEqual([undefined, { password: 's3cret', savePassword: true }]);
+    expect(secrets).toEqual(['Password for prod: ']);
+    expect(confirms).toHaveLength(1);
+    expect(confirms[0]).toContain('secrets.json');
+    expect(io.readStdout()).toContain('ssh connection "prod": OK');
+  });
+
+  it('fails with an actionable needs-password error when not interactive', async () => {
+    const { deps } = makeDeps({
+      backend: fakeBackend({
+        test: async () => ({
+          ok: false,
+          needsPassword: true,
+          error: 'Permission denied (publickey,password).',
+        }),
+      }),
+    });
+    await expect(handleSshTest({ name: 'prod' }, deps)).rejects.toThrow(/requires a password/);
+    await expect(handleSshTest({ name: 'prod' }, deps)).rejects.toThrow(
+      /kimi ssh test prod --password/,
+    );
+  });
+
+  it('tests with the password from --password without a passwordless attempt', async () => {
+    const auths: (SshAuthOptions | undefined)[] = [];
+    const { deps } = makeDeps({
+      backend: fakeBackend({
+        test: async (_name, auth) => {
+          auths.push(auth);
+          return { ok: true };
+        },
+      }),
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+      confirmAnswers: [false],
+    });
+    await handleSshTest({ name: 'prod', password: true }, deps);
+    expect(auths).toEqual([{ password: 's3cret', savePassword: false }]);
+  });
+
+  it('does not re-prompt when a --password attempt still needs a password', async () => {
+    const auths: (SshAuthOptions | undefined)[] = [];
+    const { deps, io, secrets } = makeDeps({
+      backend: fakeBackend({
+        test: async (_name, auth) => {
+          auths.push(auth);
+          return { ok: false, needsPassword: true, error: 'Permission denied (password).' };
+        },
+      }),
+      isInteractive: () => true,
+      secretAnswers: ['wrong'],
+      confirmAnswers: [false],
+    });
+    await expect(handleSshTest({ name: 'prod', password: true }, deps)).rejects.toThrow(
+      /test failed/,
+    );
+    expect(auths).toEqual([{ password: 'wrong', savePassword: false }]);
+    expect(secrets).toHaveLength(1);
+    expect(io.readStdout()).toContain('kimi ssh passwd prod');
   });
 });
 
@@ -462,7 +708,7 @@ describe('kimi ssh connect', () => {
     const connectCalls: string[] = [];
     const { deps, io, opened } = makeDeps({
       getLiveServer: async () => LIVE_SERVER,
-      backend: {
+      backend: fakeBackend({
         list: async () => [
           {
             name: 'prod',
@@ -473,16 +719,11 @@ describe('kimi ssh connect', () => {
             status: { state: 'on', localOrigin: 'http://127.0.0.1:49001', error: undefined },
           },
         ],
-        add: async () => {
-          throw new Error('unexpected');
-        },
-        remove: async () => {},
-        test: async () => ({ ok: true }),
         connect: async (name) => {
           connectCalls.push(name);
           return { localOrigin: 'http://127.0.0.1:49001' };
         },
-      },
+      }),
     });
     await handleSshConnect({ name: 'prod', open: true }, deps);
     expect(connectCalls).toEqual(['prod']);
@@ -503,6 +744,65 @@ describe('kimi ssh connect', () => {
     expect(opened).toEqual([]);
   });
 
+  it('proxy mode: needs-password prompts (hidden) and retries with the password', async () => {
+    const auths: (SshAuthOptions | undefined)[] = [];
+    const { deps, io, secrets } = makeDeps({
+      getLiveServer: async () => LIVE_SERVER,
+      backend: fakeBackend({
+        connect: async (_name, auth) => {
+          auths.push(auth);
+          if (auth === undefined) {
+            throw new SshApiError(SSH_AUTH_REQUIRED_CODE, 'password required');
+          }
+          return { localOrigin: 'http://127.0.0.1:49001' };
+        },
+      }),
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+      confirmAnswers: [true],
+    });
+    await handleSshConnect({ name: 'prod', open: false }, deps);
+    expect(auths).toEqual([undefined, { password: 's3cret', savePassword: true }]);
+    expect(secrets).toEqual(['Password for prod: ']);
+    expect(io.readStdout()).toContain('requires a password');
+    expect(io.readStdout()).toContain('SSH connection ready: prod');
+  });
+
+  it('proxy mode: needs-password fails with an actionable error when not interactive', async () => {
+    const { deps } = makeDeps({
+      getLiveServer: async () => LIVE_SERVER,
+      backend: fakeBackend({
+        connect: async () => {
+          throw new SshApiError(SSH_AUTH_REQUIRED_CODE, 'password required');
+        },
+      }),
+    });
+    await expect(handleSshConnect({ name: 'prod', open: false }, deps)).rejects.toThrow(
+      /requires a password/,
+    );
+    await expect(handleSshConnect({ name: 'prod', open: false }, deps)).rejects.toThrow(
+      /kimi ssh passwd prod/,
+    );
+  });
+
+  it('proxy mode: --password connects with the entered password directly', async () => {
+    const auths: (SshAuthOptions | undefined)[] = [];
+    const { deps } = makeDeps({
+      getLiveServer: async () => LIVE_SERVER,
+      backend: fakeBackend({
+        connect: async (_name, auth) => {
+          auths.push(auth);
+          return { localOrigin: 'http://127.0.0.1:49001' };
+        },
+      }),
+      isInteractive: () => true,
+      secretAnswers: ['s3cret'],
+      confirmAnswers: [true],
+    });
+    await handleSshConnect({ name: 'prod', open: false, password: true }, deps);
+    expect(auths).toEqual([{ password: 's3cret', savePassword: true }]);
+  });
+
   it('direct mode: holds the tunnel in-process and prints the remote token URL', async () => {
     let closed = false;
     let held = false;
@@ -519,6 +819,8 @@ describe('kimi ssh connect', () => {
       test: async () => ({ ok: true }),
       connect: async () => handle,
       disconnect: async () => {},
+      setPassword: async () => {},
+      clearPassword: async () => {},
       status: () => ({ state: 'on' as const, localOrigin: handle.localOrigin }),
       close: async () => {
         closed = true;
@@ -555,6 +857,8 @@ describe('kimi ssh connect', () => {
         remoteToken: 'remote-token',
       }),
       disconnect: async () => {},
+      setPassword: async () => {},
+      clearPassword: async () => {},
       status: () => ({ state: 'off' as const }),
       close: async () => {},
     } satisfies SshConnectionManager;
@@ -569,6 +873,69 @@ describe('kimi ssh connect', () => {
     });
     await handleSshConnect({ name: 'prod', direct: true, open: false }, deps);
     expect(restUsed).toBe(false);
+  });
+});
+
+describe('hidden-echo secret prompt', () => {
+  function fakeTty(): { input: NodeJS.ReadStream; output: NodeJS.WriteStream; written: () => string } {
+    const stream = new PassThrough();
+    let raw = false;
+    let out = '';
+    const input = Object.assign(stream, {
+      isRaw: raw,
+      setRawMode: (value: boolean) => {
+        raw = value;
+      },
+    }) as unknown as NodeJS.ReadStream;
+    const output = {
+      write(chunk: string | Uint8Array) {
+        out += String(chunk);
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { input, output, written: () => out };
+  }
+
+  it('reads a line without echo and restores raw mode', async () => {
+    const { input, output, written } = fakeTty();
+    const pending = readSecretLine({ input, output }, 'Password: ');
+    input.write('s3cr');
+    input.write('et');
+    input.write('\u007F');
+    input.write('t!');
+    input.write('\r');
+    await expect(pending).resolves.toBe('s3cret!');
+    expect(written()).toBe('Password: \n');
+  });
+
+  it('resolves empty on immediate enter', async () => {
+    const { input, output } = fakeTty();
+    const pending = readSecretLine({ input, output }, 'Password: ');
+    input.write('\r');
+    await expect(pending).resolves.toBe('');
+  });
+
+  it('rejects on Ctrl+C', async () => {
+    const { input, output } = fakeTty();
+    const pending = readSecretLine({ input, output }, 'Password: ');
+    input.write('\u0003');
+    await expect(pending).rejects.toThrow(/aborted/);
+  });
+
+  it('rejects when the input is not a TTY', async () => {
+    const { output } = fakeTty();
+    await expect(
+      readSecretLine({ input: new PassThrough() as unknown as NodeJS.ReadStream, output }, 'Password: '),
+    ).rejects.toThrow(/interactive terminal/);
+  });
+});
+
+describe('formatNeedsPasswordError', () => {
+  it('points at the interactive flag, passwd, and key-based auth', () => {
+    const message = formatNeedsPasswordError('prod', 'connect');
+    expect(message).toContain('kimi ssh connect prod --password');
+    expect(message).toContain('kimi ssh passwd prod');
+    expect(message).toContain('ssh-add');
   });
 });
 
@@ -655,6 +1022,7 @@ describe('ssh REST client', () => {
                 user: 'ubuntu',
                 port: 22,
                 identity_file: '~/.ssh/id_ed25519',
+                has_password: true,
                 status: { state: 'on', local_origin: 'http://127.0.0.1:49001' },
               },
             ],
@@ -670,6 +1038,7 @@ describe('ssh REST client', () => {
         user: 'ubuntu',
         port: 22,
         identityFile: '~/.ssh/id_ed25519',
+        hasPassword: true,
         status: { state: 'on', localOrigin: 'http://127.0.0.1:49001', error: undefined },
       },
     ]);
@@ -733,8 +1102,91 @@ describe('ssh REST client', () => {
       kimiPath: '/k/bin/kimi',
       serverRunning: true,
       error: undefined,
+      needsPassword: undefined,
     });
     expect(await client.connect('prod')).toEqual({ localOrigin: 'http://127.0.0.1:49001' });
+  });
+
+  it('sends password attempts as snake_case bodies on test and connect', async () => {
+    const bodies: unknown[] = [];
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async (url, init) => {
+        bodies.push(init.body === undefined ? undefined : JSON.parse(init.body as string));
+        if (url.endsWith('/test')) {
+          return jsonResponse(envelope({ ok: false, needs_password: true, error: 'denied' }));
+        }
+        return jsonResponse(envelope({ local_origin: 'http://127.0.0.1:49001' }));
+      }),
+    });
+    const auth: SshAuthOptions = { password: 's3cret', savePassword: true };
+    const test = await client.test('prod', auth);
+    expect(test).toEqual({
+      ok: false,
+      platform: undefined,
+      kimiPath: undefined,
+      serverRunning: undefined,
+      error: 'denied',
+      needsPassword: true,
+    });
+    await client.connect('prod', auth);
+    expect(bodies).toEqual([
+      { password: 's3cret', save_password: true },
+      { password: 's3cret', save_password: true },
+    ]);
+  });
+
+  it('sends no body on test and connect when no password attempt is given', async () => {
+    const inits: RequestInit[] = [];
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async (url, init) => {
+        inits.push(init);
+        if (url.endsWith('/test')) {
+          return jsonResponse(envelope({ ok: true }));
+        }
+        return jsonResponse(envelope({ local_origin: 'http://127.0.0.1:49001' }));
+      }),
+    });
+    await client.test('prod');
+    await client.connect('prod');
+    expect(inits.map((init) => init.body)).toEqual([undefined, undefined]);
+    expect(inits.map((init) => (init.headers as Record<string, string>)['Content-Type'])).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('posts and deletes saved passwords on the password endpoint', async () => {
+    const calls: { url: string; method: string | undefined; body: unknown }[] = [];
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async (url, init) => {
+        calls.push({
+          url,
+          method: init.method,
+          body: init.body === undefined ? undefined : JSON.parse(init.body as string),
+        });
+        return jsonResponse(envelope({}));
+      }),
+    });
+    await client.setPassword('prod', 's3cret');
+    await client.clearPassword('prod');
+    expect(calls).toEqual([
+      {
+        url: 'http://127.0.0.1:58627/api/v1/ssh/connections/prod/password',
+        method: 'PUT',
+        body: { password: 's3cret' },
+      },
+      {
+        url: 'http://127.0.0.1:58627/api/v1/ssh/connections/prod/password',
+        method: 'DELETE',
+        body: undefined,
+      },
+    ]);
   });
 
   it('sends no JSON content-type on bodyless requests', async () => {
@@ -782,6 +1234,33 @@ describe('ssh REST client', () => {
 describe('local registry integration (temp home, no server)', () => {
   let homeDir: string;
 
+  const fakeRunner: ProcessRunner = {
+    run: async () => ({ code: 255, stdout: '', stderr: 'Permission denied (publickey).' }),
+    spawn: () => {
+      throw new Error('unexpected spawn');
+    },
+  };
+
+  function makeLocalDeps(io: ReturnType<typeof makeIo>): SshCommandDeps {
+    return {
+      homeDir,
+      getLiveServer: async () => undefined,
+      resolveToken: () => undefined,
+      createRestClient: () => {
+        throw new Error('no server in this test');
+      },
+      createLocalManager: () => createSshConnectionManager({ homeDir, runner: fakeRunner }),
+      openUrl: () => {},
+      prompt: async () => '',
+      promptSecret: async () => '',
+      confirm: async () => false,
+      isInteractive: () => false,
+      holdForeground: async () => {},
+      stdout: io.stdout,
+      stderr: io.stderr,
+    };
+  }
+
   beforeEach(() => {
     homeDir = mkdtempSync(join(tmpdir(), 'kimi-ssh-cli-'));
   });
@@ -792,20 +1271,7 @@ describe('local registry integration (temp home, no server)', () => {
 
   it('add/list/remove round-trip through the real local manager', async () => {
     const io = makeIo();
-    const deps: SshCommandDeps = {
-      homeDir,
-      getLiveServer: async () => undefined,
-      resolveToken: () => undefined,
-      createRestClient: () => {
-        throw new Error('no server in this test');
-      },
-      openUrl: () => {},
-      prompt: async () => '',
-      isInteractive: () => false,
-      holdForeground: async () => {},
-      stdout: io.stdout,
-      stderr: io.stderr,
-    };
+    const deps = makeLocalDeps(io);
     await handleSshAdd(
       { name: 'prod', target: 'ubuntu@example.com', port: '2222', identityFile: '~/.ssh/id' },
       deps,
@@ -814,6 +1280,7 @@ describe('local registry integration (temp home, no server)', () => {
     const out = io.readStdout();
     expect(out).toContain('prod');
     expect(out).toContain('ubuntu@example.com:2222');
+    expect(out).toContain('key');
     await handleSshRemove({ name: 'prod' }, deps);
     await handleSshList(deps);
     expect(io.readStdout()).toContain('No SSH connections saved yet');
@@ -821,23 +1288,47 @@ describe('local registry integration (temp home, no server)', () => {
 
   it('rejects duplicates with an actionable message', async () => {
     const io = makeIo();
-    const deps: SshCommandDeps = {
-      homeDir,
-      getLiveServer: async () => undefined,
-      resolveToken: () => undefined,
-      createRestClient: () => {
-        throw new Error('no server in this test');
-      },
-      openUrl: () => {},
-      prompt: async () => '',
-      isInteractive: () => false,
-      holdForeground: async () => {},
-      stdout: io.stdout,
-      stderr: io.stderr,
-    };
+    const deps = makeLocalDeps(io);
     await handleSshAdd({ name: 'prod', target: 'example.com' }, deps);
     await expect(handleSshAdd({ name: 'prod', target: 'example.com' }, deps)).rejects.toThrow(
       /already exists/,
     );
+  });
+
+  it('passwd set/clear round-trip through the real local secrets store', async () => {
+    const io = makeIo();
+    const deps = makeLocalDeps(io);
+    await handleSshAdd({ name: 'prod', target: 'example.com' }, deps);
+    await handleSshPasswd(
+      { name: 'prod' },
+      { ...deps, isInteractive: () => true, promptSecret: async () => 's3cret' },
+    );
+    const secretsPath = join(homeDir, 'ssh', 'secrets.json');
+    const stored = JSON.parse(readFileSync(secretsPath, 'utf8')) as {
+      passwords: Record<string, string>;
+    };
+    expect(stored.passwords['prod']).toBe('s3cret');
+    await handleSshList(deps);
+    expect(io.readStdout()).toContain('password (saved)');
+    await handleSshPasswd({ name: 'prod', clear: true }, deps);
+    const cleared = JSON.parse(readFileSync(secretsPath, 'utf8')) as {
+      passwords: Record<string, string>;
+    };
+    expect(cleared.passwords['prod']).toBeUndefined();
+  });
+
+  it('remove cascades the saved password', async () => {
+    const io = makeIo();
+    const deps = makeLocalDeps(io);
+    await handleSshAdd({ name: 'prod', target: 'example.com' }, deps);
+    await handleSshPasswd(
+      { name: 'prod' },
+      { ...deps, isInteractive: () => true, promptSecret: async () => 's3cret' },
+    );
+    await handleSshRemove({ name: 'prod' }, deps);
+    const cleared = JSON.parse(
+      readFileSync(join(homeDir, 'ssh', 'secrets.json'), 'utf8'),
+    ) as { passwords: Record<string, string> };
+    expect(cleared.passwords['prod']).toBeUndefined();
   });
 });

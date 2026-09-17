@@ -35,6 +35,20 @@ export const SSH_LIST_EMPTY_HINT =
   'No SSH connections saved yet.\nAdd one with:  kimi ssh add <name> <[user@]host>';
 
 /**
+ * The AUTH column of `kimi ssh list`: how the connection authenticates.
+ * `agent` covers the ssh-agent, default key files, and ssh config; `key` an
+ * explicit identity file; `password (saved)` a password in the secrets store.
+ */
+export function formatAuthMethod(info: Pick<SshConnectionInfo, 'identityFile' | 'hasPassword'>): string {
+  const key = info.identityFile !== undefined;
+  const saved = info.hasPassword === true;
+  if (key && saved) return 'key + password (saved)';
+  if (key) return 'key';
+  if (saved) return 'password (saved)';
+  return 'agent';
+}
+
+/**
  * Render `kimi ssh list` as an aligned table. The last column shows the live
  * endpoint when connected, the failure when in error state, and `·` otherwise.
  */
@@ -46,9 +60,9 @@ export function formatConnectionTable(connections: readonly SshConnectionInfo[])
         : info.status.state === 'error'
           ? (info.status.error ?? 'unknown error')
           : '·';
-    return [info.name, sshTarget(info), String(info.port), formatState(info), detail] as const;
+    return [info.name, sshTarget(info), String(info.port), formatAuthMethod(info), formatState(info), detail] as const;
   });
-  const header = ['NAME', 'TARGET', 'PORT', 'STATE', 'ENDPOINT / ERROR'] as const;
+  const header = ['NAME', 'TARGET', 'PORT', 'AUTH', 'STATE', 'ENDPOINT / ERROR'] as const;
   const widths = header.map((title, column) =>
     Math.max(title.length, ...rows.map((row) => stripAnsiLength(row[column] ?? ''))),
   );
@@ -140,13 +154,45 @@ export function formatConnectDirectBanner(options: {
 }
 
 /**
+ * Non-interactive needs-password failure: tell the user exactly how to supply
+ * a password (interactive flag, saved password) or switch to key-based auth.
+ */
+export function formatNeedsPasswordError(name: string, command: 'connect' | 'test'): string {
+  return [
+    `ssh connection "${name}" requires a password — public key authentication failed and no password is saved.`,
+    `  Enter one interactively:  kimi ssh ${command} ${name} --password`,
+    `  Save one for later:       kimi ssh passwd ${name}`,
+    '  Or set up key-based auth: load a key into ssh-agent (`ssh-add`), or re-add the connection with --identity-file.',
+  ].join('\n');
+}
+
+/** The status line `kimi ssh add` prints for its post-save probe. */
+export function formatAddAuthLine(result: {
+  name: string;
+  ok: boolean;
+  needsPassword?: boolean;
+  passwordUsed: boolean;
+  passwordSaved: boolean;
+}): string {
+  if (result.ok && result.passwordSaved) return `Authentication: ${ok('OK')} (password, saved)`;
+  if (result.ok && result.passwordUsed) {
+    return `Authentication: ${ok('OK')} (password, not saved — run \`kimi ssh passwd ${result.name}\` to store it)`;
+  }
+  if (result.ok) return `Authentication: ${ok('OK')} (public key)`;
+  if (result.needsPassword === true) {
+    return `Authentication: ${bad('password required')} — run \`kimi ssh passwd ${result.name}\` to save one, or connect with \`kimi ssh connect ${result.name} --password\``;
+  }
+  return `Connection test: ${bad('failed')}`;
+}
+
+/**
  * Turn a failure into a next step the user can act on. Returns undefined when
  * the raw message is already self-explanatory.
  */
 export function sshErrorHint(error: unknown): string | undefined {
   if (error instanceof SshRemoteError) {
     if (error.kind === 'auth') {
-      return 'Authentication failed. Check your keys with `ssh-add -l`, or save the connection with an explicit key: kimi ssh add <name> <[user@]host> --identity-file <path>.';
+      return 'Authentication failed. Check your keys with `ssh-add -l`, save the connection with an explicit key (`kimi ssh add <name> <[user@]host> --identity-file <path>`), or use a password (`kimi ssh passwd <name>`).';
     }
     if (error.kind === 'host-unreachable' || error.kind === 'network') {
       return 'The host is unreachable. Check the host name and your network connection (VPN, firewall, proxy).';

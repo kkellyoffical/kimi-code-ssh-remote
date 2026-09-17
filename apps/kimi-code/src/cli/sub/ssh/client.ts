@@ -10,18 +10,28 @@
 
 import type {
   RemotePlatform,
+  SshAuthOptions,
   SshConnectionInfo,
   SshConnectionSpec,
   SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 
-/** The operation surface `kimi ssh` needs; the local manager satisfies it too. */
+/** Server error code meaning "authentication needs a password" (SSH_AUTH_REQUIRED). */
+export const SSH_AUTH_REQUIRED_CODE = 40130;
+
+/**
+ * The operation surface `kimi ssh` needs; the local manager satisfies it
+ * natively, the REST client maps the same operations onto the server.
+ * Passwords are write-only across both: never returned, never logged.
+ */
 export interface SshBackend {
   list(): Promise<readonly SshConnectionInfo[]>;
   add(spec: SshConnectionSpec): Promise<SshConnectionInfo>;
   remove(name: string): Promise<void>;
-  test(name: string): Promise<SshTestResult>;
-  connect(name: string): Promise<{ localOrigin: string }>;
+  test(name: string, auth?: SshAuthOptions): Promise<SshTestResult>;
+  connect(name: string, auth?: SshAuthOptions): Promise<{ localOrigin: string; remoteToken?: string }>;
+  setPassword(name: string, password: string): Promise<void>;
+  clearPassword(name: string): Promise<void>;
 }
 
 /** Non-ok envelope from the server: carries the numeric error code for hints. */
@@ -47,6 +57,7 @@ interface WireConnection {
   user?: string;
   port: number;
   identity_file?: string;
+  has_password?: boolean;
   status?: WireStatus;
 }
 
@@ -63,12 +74,18 @@ function fromWire(wire: WireConnection): SshConnectionInfo {
     user: wire.user,
     port: wire.port,
     identityFile: wire.identity_file,
+    hasPassword: wire.has_password,
     status: {
       state: wire.status?.state ?? 'off',
       localOrigin: wire.status?.local_origin,
       error: wire.status?.error,
     },
   };
+}
+
+function authBody(auth: SshAuthOptions | undefined): Record<string, unknown> | undefined {
+  if (auth === undefined) return undefined;
+  return { password: auth.password, save_password: auth.savePassword };
 }
 
 export interface SshRestClientOptions {
@@ -135,22 +152,36 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
     async remove(name) {
       await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}`);
     },
-    async test(name) {
-      const data = await call<SshTestWire>('POST', `/${encodeURIComponent(name)}/test`);
+    async test(name, auth) {
+      const data = await call<SshTestWire>(
+        'POST',
+        `/${encodeURIComponent(name)}/test`,
+        authBody(auth),
+      );
       return {
         ok: data.ok,
         platform: data.platform as RemotePlatform | undefined,
         kimiPath: data.kimi_path,
         serverRunning: data.server_running,
         error: data.error,
+        needsPassword: data.needs_password,
       };
     },
-    async connect(name) {
+    async connect(name, auth) {
       const data = await call<{ local_origin: string }>(
         'POST',
         `/${encodeURIComponent(name)}/connect`,
+        authBody(auth),
       );
       return { localOrigin: data.local_origin };
+    },
+    async setPassword(name, password) {
+      await call<Record<string, never>>('PUT', `/${encodeURIComponent(name)}/password`, {
+        password,
+      });
+    },
+    async clearPassword(name) {
+      await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}/password`);
     },
   };
 }
@@ -161,4 +192,5 @@ interface SshTestWire {
   kimi_path?: string;
   server_running?: boolean;
   error?: string;
+  needs_password?: boolean;
 }
