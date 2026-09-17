@@ -133,7 +133,7 @@ In `stream-json` mode, regular replies produce an Assistant message; when the mo
 
 ## Subcommands
 
-`kimi` provides the following subcommands: `login` (non-interactive login), `acp` (ACP IDE mode), `web` (run the local REST/WebSocket/web service in the foreground and open the web UI), `doctor` (validate configuration files), `export` (export a session), `migrate` (migrate legacy data), `upgrade` (check for updates), and `provider` (manage providers).
+`kimi` provides the following subcommands: `login` (non-interactive login), `acp` (ACP IDE mode), `web` (run the local REST/WebSocket/web service in the foreground and open the web UI), `ssh` (manage SSH remote connections), `doctor` (validate configuration files), `export` (export a session), `migrate` (migrate legacy data), `upgrade` (check for updates), and `provider` (manage providers).
 
 ### `kimi login`
 
@@ -195,6 +195,30 @@ Deprecated — only stops a server started by a version before 0.28.0. Those ver
 #### `kimi web rotate-token`
 
 Generate a new persistent bearer token (written to `~/.kimi-code/server.token`); the previous token stops working immediately. The token is shared by the whole home directory, so every running instance picks the new one up on its next auth check — no restart needed.
+
+### `kimi ssh`
+
+Manage SSH remote connections and open a remote machine's web UI through a local tunnel. Connections are saved under `~/.kimi-code/ssh/connections.json`. When a local server (`kimi web`) is running, the CLI operates through it, so the terminal and the web UI share the same live tunnels; otherwise `kimi ssh` works against the local registry directly.
+
+```sh
+kimi ssh add prod ubuntu@example.com   # save a connection
+kimi ssh list                          # saved connections + live status
+kimi ssh test prod                     # probe connectivity and the remote setup
+kimi ssh connect prod                  # establish the tunnel and open the remote web UI
+kimi ssh remove prod                   # delete a saved connection
+```
+
+| Command | Description |
+| --- | --- |
+| `kimi ssh add <name> [target]` | Save a connection; `target` is `[user@]host`, with `--port`, `--identity-file`, and `--user` as options. Run without `target` in a terminal to be prompted field by field |
+| `kimi ssh list` | List saved connections with their live status (endpoint when connected, last error when failed) |
+| `kimi ssh remove <name>` | Delete a saved connection, disconnecting it first when connected |
+| `kimi ssh test <name>` | Run an SSH handshake and report the remote platform, kimi install state, and server state |
+| `kimi ssh connect <name>` | Establish the tunnel and print the remote web UI URL |
+
+`connect` has two modes. With a running local server (the default), the server holds the tunnel and the command prints two URLs: the remote web UI (the local web UI pointed at the remote through the `?kimi_origin=` query parameter) and the local web UI for management. Without a server — or with `--direct` — this terminal holds the tunnel until `Ctrl+C`, and the printed URL points at the remote's own web UI on the tunnel port. `--no-open` skips opening the browser.
+
+The first `connect` to a fresh remote installs the Kimi Code CLI binary there and starts its `kimi web` server automatically; later connections reuse that setup. See [Using Kimi Code in the browser](../guides/web.md#working-on-remote-machines-over-ssh) for the browser-side flow.
 
 ### `kimi install-desktop`
 

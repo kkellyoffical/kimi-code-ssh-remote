@@ -589,6 +589,7 @@ describe('CLI options parsing', () => {
         'web',
         'server',
         'rc',
+        'ssh',
         'login',
         'doctor',
         'vis',

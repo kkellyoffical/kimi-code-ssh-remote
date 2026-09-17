@@ -133,7 +133,7 @@ kimi -p "List changed files" --output-format stream-json
 
 ## 子命令
 
-`kimi` 提供以下子命令：`login`（非交互式登录）、`acp`（ACP IDE 模式）、`web`（前台运行本地 REST/WebSocket/web 服务并打开 web UI）、`doctor`（校验配置文件）、`export`（导出会话）、`migrate`（迁移旧版数据）、`upgrade`（检查更新）、`provider`（管理供应商）。
+`kimi` 提供以下子命令：`login`（非交互式登录）、`acp`（ACP IDE 模式）、`web`（前台运行本地 REST/WebSocket/web 服务并打开 web UI）、`ssh`（管理 SSH 远程连接）、`doctor`（校验配置文件）、`export`（导出会话）、`migrate`（迁移旧版数据）、`upgrade`（检查更新）、`provider`（管理供应商）。
 
 ### `kimi login`
 
@@ -195,6 +195,30 @@ kimi web --port 58628    # 指定绑定端口
 #### `kimi web rotate-token`
 
 生成新的持久化 bearer token（写入 `~/.kimi-code/server.token`），旧 token 立即失效。token 是整个 home 目录共享的，所有运行中的实例会在下一次鉴权校验时自动换用新 token，无需重启。
+
+### `kimi ssh`
+
+管理 SSH 远程连接，并通过本地隧道在浏览器中打开远程机器的 web UI。连接保存在 `~/.kimi-code/ssh/connections.json`。当本地服务（`kimi web`）正在运行时，CLI 会通过该服务操作，使终端与 web UI 共享同一批隧道；没有运行中的服务时，`kimi ssh` 直接读写本地注册表。
+
+```sh
+kimi ssh add prod ubuntu@example.com   # 保存连接
+kimi ssh list                          # 已保存的连接及实时状态
+kimi ssh test prod                     # 探测连通性与远端环境
+kimi ssh connect prod                  # 建立隧道并打开远端 web UI
+kimi ssh remove prod                   # 删除已保存的连接
+```
+
+| 命令 | 说明 |
+| --- | --- |
+| `kimi ssh add <name> [target]` | 保存连接；`target` 为 `[user@]host`，可搭配 `--port`、`--identity-file`、`--user`。在终端中不带 `target` 运行时会逐项提示输入 |
+| `kimi ssh list` | 列出已保存的连接及实时状态（已连接时显示端点，失败时显示最近错误） |
+| `kimi ssh remove <name>` | 删除已保存的连接，若已连接则先断开 |
+| `kimi ssh test <name>` | 发起 SSH 握手，报告远端平台、kimi 安装状态与服务状态 |
+| `kimi ssh connect <name>` | 建立隧道并打印远端 web UI 地址 |
+
+`connect` 有两种模式。默认模式（本地服务正在运行）下由本地服务持有隧道，命令会打印两个 URL：远端 web UI（本地 web UI 通过 `?kimi_origin=` 查询参数指向远端）和用于管理的本地 web UI。没有运行中的服务时（或使用 `--direct`），隧道由当前终端持有，按 `Ctrl+C` 断开，打印的 URL 指向隧道端口上远端自己的 web UI。`--no-open` 表示不自动打开浏览器。
+
+首次对一台新远端执行 `connect` 时，会自动在远端安装 Kimi Code CLI 并启动其 `kimi web` 服务；之后的连接直接复用这套环境。浏览器侧的使用流程见 [在浏览器中使用 Kimi Code](../guides/web.md#通过-ssh-在远程机器上工作)。
 
 ### `kimi install-desktop`
 

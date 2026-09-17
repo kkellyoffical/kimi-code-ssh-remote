@@ -39,6 +39,7 @@
     "#/tui/commands": "./src/tui/commands/index.ts",
     "#/cli/sub/web": "./src/cli/sub/web/index.ts",
     "#/cli/sub/web/*": "./src/cli/sub/web/*.ts",
+    "#/cli/sub/ssh": "./src/cli/sub/ssh/index.ts",
     "#/generated/vis-web-asset": [
       "./src/generated/vis-web-asset.ts",
       "./src/generated/vis-web-asset.d.ts"
@@ -92,6 +93,7 @@
     "@moonshot-ai/minidb": "workspace:^",
     "@moonshot-ai/pi-tui": "workspace:^",
     "@moonshot-ai/remote-control": "workspace:^",
+    "@moonshot-ai/ssh-remote": "workspace:^",
     "@moonshot-ai/vis-server": "workspace:^",
     "@moonshot-ai/vis-web": "workspace:*",
     "@types/qrcode": "^1.5.6",
