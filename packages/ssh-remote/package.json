@@ -1,0 +1,45 @@
+{
+  "name": "@moonshot-ai/ssh-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SSH remote connections for Kimi Code: connection profiles, system ssh/scp lifecycle with ControlMaster reuse, remote kimi web bootstrap, and local port-forward tunnels.",
+  "license": "MIT",
+  "author": "Moonshot AI",
+  "homepage": "https://github.com/MoonshotAI/kimi-code/tree/main/packages/ssh-remote#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MoonshotAI/kimi-code.git",
+    "directory": "packages/ssh-remote"
+  },
+  "bugs": {
+    "url": "https://github.com/MoonshotAI/kimi-code/issues"
+  },
+  "keywords": [
+    "kimi",
+    "ssh",
+    "remote",
+    "tunnel"
+  ],
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "imports": {
+    "#/*": "./src/*.ts"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  }
+}
