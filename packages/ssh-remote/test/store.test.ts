@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -93,6 +93,7 @@ describe('ConnectionStore', () => {
   it('fails with a config error when the file is corrupt', async () => {
     const home = makeHome();
     const store = new ConnectionStore(home);
+    mkdirSync(dirname(store.filePath), { recursive: true });
     writeFileSync(store.filePath, '{not json', 'utf8');
     const error = await store.list().catch((error) => error);
     expect(error).toBeInstanceOf(SshRemoteError);

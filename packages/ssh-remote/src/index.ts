@@ -6,3 +6,4 @@ export * from './ssh';
 export * from './bootstrap';
 export * from './tunnel';
 export * from './session';
+export * from './manager';

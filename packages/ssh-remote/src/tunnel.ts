@@ -35,6 +35,21 @@ export interface SshTunnelOptions {
   readonly onStateChange?: (status: TunnelStatus) => void;
 }
 
+export type SshTunnelTuning = Partial<
+  Pick<
+    SshTunnelOptions,
+    | 'pickFreePort'
+    | 'probeLocalPort'
+    | 'sleep'
+    | 'readyTimeoutMs'
+    | 'readyPollIntervalMs'
+    | 'maxReconnectAttempts'
+    | 'reconnectBaseDelayMs'
+    | 'reconnectMaxDelayMs'
+    | 'onStateChange'
+  >
+>;
+
 const DEFAULT_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_READY_POLL_INTERVAL_MS = 100;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;

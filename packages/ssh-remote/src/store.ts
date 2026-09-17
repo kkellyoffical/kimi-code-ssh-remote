@@ -11,7 +11,8 @@ import {
   type SshConnectionProfileInput,
 } from './profile';
 
-export const SSH_CONNECTIONS_FILE = 'ssh-connections.json';
+export const SSH_CONNECTIONS_DIR = 'ssh';
+export const SSH_CONNECTIONS_FILE = 'connections.json';
 
 const storeFileSchema = z.object({
   version: z.literal(1),
@@ -22,7 +23,7 @@ export class ConnectionStore {
   constructor(readonly homeDir: string) {}
 
   get filePath(): string {
-    return join(this.homeDir, SSH_CONNECTIONS_FILE);
+    return join(this.homeDir, SSH_CONNECTIONS_DIR, SSH_CONNECTIONS_FILE);
   }
 
   async list(): Promise<SshConnectionProfile[]> {

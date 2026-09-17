@@ -46,20 +46,19 @@ export async function bootstrapRemote(options: BootstrapOptions): Promise<Bootst
   const tokenTimeoutMs = options.tokenTimeoutMs ?? 30_000;
   const log = options.logger ?? ((): void => {});
 
-  const platform = await detectPlatform(client);
-  log(`remote platform: ${platform}`);
+  const probe = await probeRemote(client, { remotePort });
+  log(`remote platform: ${probe.platform}`);
 
-  const probe = await probeRemoteKimi(client);
   let kimiPath = probe.kimiPath;
   if (kimiPath === undefined) {
-    kimiPath = await installRemoteKimi(client, options, platform, probe.remoteHome, log);
+    kimiPath = await installRemoteKimi(client, options, probe.platform, probe.remoteHome, log);
   } else {
     log(`remote kimi found at ${kimiPath}`);
   }
 
   const origin = `http://${REMOTE_SERVER_HOST}:${remotePort}`;
   let serverStarted = false;
-  if (await healthProbe(client, origin)) {
+  if (probe.serverRunning) {
     log(`remote kimi web already listening on ${origin}`);
   } else {
     await startRemoteServer(client, kimiPath, probe.remoteHome, remotePort, log);
@@ -79,12 +78,37 @@ export async function bootstrapRemote(options: BootstrapOptions): Promise<Bootst
   });
 
   return {
-    platform,
+    platform: probe.platform,
     kimiPath,
     remoteHome: probe.remoteHome,
     remotePort,
     token,
     serverStarted,
+  };
+}
+
+export interface RemoteProbeResult {
+  readonly platform: RemotePlatform;
+  readonly remoteHome: string;
+  readonly kimiPath?: string;
+  readonly serverRunning: boolean;
+}
+
+export async function probeRemote(
+  client: SshClient,
+  options?: { remotePort?: number },
+): Promise<RemoteProbeResult> {
+  const platform = await detectPlatform(client);
+  const probe = await probeRemoteKimi(client);
+  const serverRunning = await healthProbe(
+    client,
+    `http://${REMOTE_SERVER_HOST}:${options?.remotePort ?? DEFAULT_REMOTE_SERVER_PORT}`,
+  );
+  return {
+    platform,
+    remoteHome: probe.remoteHome,
+    kimiPath: probe.kimiPath,
+    serverRunning,
   };
 }
 

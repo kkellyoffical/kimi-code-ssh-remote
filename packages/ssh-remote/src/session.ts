@@ -5,7 +5,7 @@ import type { SshConnectionProfile } from './profile';
 import { resolveKimiHome } from './profile';
 import { createSystemProcessRunner, type ProcessRunner } from './runner';
 import { SshClient } from './ssh';
-import { SshTunnel, type SshTunnelOptions, type TunnelStatus } from './tunnel';
+import { SshTunnel, type SshTunnelTuning, type TunnelStatus } from './tunnel';
 
 export interface SshRemoteSession {
   readonly profile: SshConnectionProfile;
@@ -18,21 +18,6 @@ export interface SshRemoteSession {
   close(): Promise<void>;
 }
 
-type TunnelTuning = Partial<
-  Pick<
-    SshTunnelOptions,
-    | 'pickFreePort'
-    | 'probeLocalPort'
-    | 'sleep'
-    | 'readyTimeoutMs'
-    | 'readyPollIntervalMs'
-    | 'maxReconnectAttempts'
-    | 'reconnectBaseDelayMs'
-    | 'reconnectMaxDelayMs'
-    | 'onStateChange'
-  >
->;
-
 export interface OpenSshRemoteSessionOptions {
   readonly profile: SshConnectionProfile;
   readonly homeDir?: string;
@@ -43,7 +28,7 @@ export interface OpenSshRemoteSessionOptions {
   readonly bootstrap?: Partial<
     Pick<BootstrapOptions, 'readyTimeoutMs' | 'tokenTimeoutMs' | 'pollIntervalMs' | 'sleep'>
   >;
-  readonly tunnel?: TunnelTuning;
+  readonly tunnel?: SshTunnelTuning;
   readonly logger?: (line: string) => void;
 }
 
@@ -55,7 +40,7 @@ export async function openSshRemoteSession(
   const client = new SshClient({
     profile: options.profile,
     runner,
-    controlDir: join(homeDir, 'ssh-remote', 'sockets'),
+    controlDir: join(homeDir, 'ssh', 'sockets'),
   });
   await client.connect();
   try {
