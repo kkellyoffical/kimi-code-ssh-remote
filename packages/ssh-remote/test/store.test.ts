@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { SshRemoteError } from '../src/errors';
 import { resolveKimiHome } from '../src/profile';
+import { SecretsStore } from '../src/secrets';
 import { ConnectionStore } from '../src/store';
 
 const cleanups: Array<() => void> = [];
@@ -126,6 +127,65 @@ describe('ConnectionStore', () => {
     mkdirSync(dirname(store.filePath), { recursive: true });
     writeFileSync(store.filePath, '{not json', 'utf8');
     const error = await store.list().catch((error) => error);
+    expect(error).toBeInstanceOf(SshRemoteError);
+    expect((error as SshRemoteError).kind).toBe('config');
+  });
+});
+
+describe('SecretsStore', () => {
+  it('starts empty when no file exists', async () => {
+    const store = new SecretsStore(makeHome());
+    await expect(store.hasPassword('devbox')).resolves.toBe(false);
+    await expect(store.getPassword('devbox')).resolves.toBeUndefined();
+    await expect(store.removePassword('devbox')).resolves.toBe(false);
+  });
+
+  it('sets, gets, checks, and removes passwords', async () => {
+    const store = new SecretsStore(makeHome());
+    await store.setPassword('devbox', 's3cret');
+    await expect(store.hasPassword('devbox')).resolves.toBe(true);
+    await expect(store.getPassword('devbox')).resolves.toBe('s3cret');
+    await store.setPassword('devbox', 'n3w-s3cret');
+    await expect(store.getPassword('devbox')).resolves.toBe('n3w-s3cret');
+    await expect(store.removePassword('devbox')).resolves.toBe(true);
+    await expect(store.hasPassword('devbox')).resolves.toBe(false);
+    await expect(store.removePassword('devbox')).resolves.toBe(false);
+  });
+
+  it('persists passwords across store instances', async () => {
+    const home = makeHome();
+    await new SecretsStore(home).setPassword('devbox', 's3cret');
+    await expect(new SecretsStore(home).getPassword('devbox')).resolves.toBe('s3cret');
+  });
+
+  it('keeps passwords of other connections when removing one', async () => {
+    const store = new SecretsStore(makeHome());
+    await store.setPassword('one', 'pw-one');
+    await store.setPassword('two', 'pw-two');
+    await store.removePassword('one');
+    await expect(store.getPassword('two')).resolves.toBe('pw-two');
+  });
+
+  it('writes the secrets file with private permissions', async () => {
+    const home = makeHome();
+    const store = new SecretsStore(home);
+    await store.setPassword('devbox', 's3cret');
+    const mode = statSync(store.filePath).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('rejects empty names and passwords', async () => {
+    const store = new SecretsStore(makeHome());
+    await expect(store.setPassword('', 's3cret')).rejects.toThrow(SshRemoteError);
+    await expect(store.setPassword('devbox', '')).rejects.toThrow(SshRemoteError);
+  });
+
+  it('fails with a config error when the file is corrupt', async () => {
+    const home = makeHome();
+    const store = new SecretsStore(home);
+    mkdirSync(dirname(store.filePath), { recursive: true });
+    writeFileSync(store.filePath, '{not json', 'utf8');
+    const error: unknown = await store.getPassword('devbox').catch((error) => error);
     expect(error).toBeInstanceOf(SshRemoteError);
     expect((error as SshRemoteError).kind).toBe('config');
   });

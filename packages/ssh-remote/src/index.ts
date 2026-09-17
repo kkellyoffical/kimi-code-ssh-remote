@@ -1,6 +1,7 @@
 export * from './errors';
 export * from './profile';
 export * from './store';
+export * from './secrets';
 export * from './runner';
 export * from './ssh';
 export * from './bootstrap';

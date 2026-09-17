@@ -4,8 +4,9 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { SshRemoteError } from '../src/errors';
+import { SshRemoteError, isNeedsPasswordError } from '../src/errors';
 import { createSshConnectionManager } from '../src/manager';
+import { SecretsStore } from '../src/secrets';
 
 import { FakeProcessRunner } from './fake-runner';
 
@@ -43,10 +44,11 @@ function makeManager(
   port = 49160,
   sleep?: (ms: number) => Promise<void>,
   tunnelOverrides: Record<string, unknown> = {},
+  homeDir?: string,
 ) {
   let nextPort = port;
   return createSshConnectionManager({
-    homeDir: makeHome(),
+    homeDir: homeDir ?? makeHome(),
     runner,
     tunnel: {
       pickFreePort: async () => nextPort++,
@@ -57,6 +59,19 @@ function makeManager(
     },
     bootstrap: { sleep: async () => {}, pollIntervalMs: 1 },
   });
+}
+
+const AUTH_FAILURE = {
+  code: 255,
+  stdout: '',
+  stderr: 'alice@dev.example.com: Permission denied (publickey,password).',
+};
+
+function scriptPasswordRemote(runner: FakeProcessRunner): void {
+  scriptHealthyRemote(runner);
+  runner.onRun(/ true$/, (argv) =>
+    argv.includes('BatchMode=yes') ? AUTH_FAILURE : { code: 0, stdout: '', stderr: '' },
+  );
 }
 
 const exitRuns = (runner: FakeProcessRunner) =>
@@ -274,6 +289,165 @@ describe('SshConnectionManager', () => {
     expect(runner.spawns[0]?.killed).toBe(true);
     expect(exitRuns(runner)).toHaveLength(1);
     await expect(manager.list()).resolves.toEqual([]);
+    await manager.close();
+  });
+
+  it('connects with a provided password via askpass and keeps it out of argv', async () => {
+    const runner = new FakeProcessRunner();
+    scriptPasswordRemote(runner);
+    const home = makeHome();
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const handle = await manager.connect('devbox', { password: 's3cret', savePassword: true });
+    expect(handle.localOrigin).toBe('http://127.0.0.1:49160');
+    const handshakes = runner.runs.filter((run) => run.argv.at(-1) === 'true');
+    expect(handshakes.length).toBeGreaterThanOrEqual(2);
+    expect(handshakes[0]?.argv).toContain('BatchMode=yes');
+    const retry = handshakes.find((run) => !run.argv.includes('BatchMode=yes'));
+    expect(retry?.env?.['SSH_ASKPASS_REQUIRE']).toBe('force');
+    expect(retry?.env?.['KIMI_SSH_PASSWORD']).toBe('s3cret');
+    for (const run of runner.runs) {
+      expect(run.argv.join(' ')).not.toContain('s3cret');
+    }
+    await expect(new SecretsStore(home).getPassword('devbox')).resolves.toBe('s3cret');
+    const [info] = await manager.list();
+    expect(info?.hasPassword).toBe(true);
+    await manager.close();
+  });
+
+  it('does not persist the password without savePassword', async () => {
+    const runner = new FakeProcessRunner();
+    scriptPasswordRemote(runner);
+    const home = makeHome();
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox', { password: 's3cret' });
+    await expect(new SecretsStore(home).hasPassword('devbox')).resolves.toBe(false);
+    const [info] = await manager.list();
+    expect(info?.hasPassword).toBe(false);
+    await manager.close();
+  });
+
+  it('uses a stored password when connecting without one', async () => {
+    const runner = new FakeProcessRunner();
+    scriptPasswordRemote(runner);
+    const home = makeHome();
+    await new SecretsStore(home).setPassword('devbox', 'st0red');
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox');
+    const retry = runner.runs.find((run) => !run.argv.includes('BatchMode=yes'));
+    expect(retry?.env?.['KIMI_SSH_PASSWORD']).toBe('st0red');
+    await manager.close();
+  });
+
+  it('marks the connection as needing a password when auth fails without one', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = AUTH_FAILURE;
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const error: unknown = await manager.connect('devbox').catch((error) => error);
+    expect(isNeedsPasswordError(error)).toBe(true);
+    const status = manager.status('devbox');
+    expect(status.state).toBe('error');
+    expect(status.needsPassword).toBe(true);
+    await manager.close();
+  });
+
+  it('clears needsPassword after a later connect succeeds with a password', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = AUTH_FAILURE;
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await expect(manager.connect('devbox')).rejects.toThrow(SshRemoteError);
+    expect(manager.status('devbox').needsPassword).toBe(true);
+    scriptPasswordRemote(runner);
+    await manager.connect('devbox', { password: 's3cret' });
+    expect(manager.status('devbox').needsPassword).toBeUndefined();
+    expect(manager.status('devbox').state).toBe('on');
+    await manager.close();
+  });
+
+  it('reports needsPassword in a failed test result without throwing', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = AUTH_FAILURE;
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const result = await manager.test('devbox');
+    expect(result.ok).toBe(false);
+    expect(result.needsPassword).toBe(true);
+    expect(result.error).not.toContain('s3cret');
+  });
+
+  it('tests with a provided password and persists it when savePassword is set', async () => {
+    const runner = new FakeProcessRunner();
+    scriptPasswordRemote(runner);
+    const home = makeHome();
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const result = await manager.test('devbox', { password: 's3cret', savePassword: true });
+    expect(result.ok).toBe(true);
+    await expect(new SecretsStore(home).getPassword('devbox')).resolves.toBe('s3cret');
+    for (const run of runner.runs) {
+      expect(run.argv.join(' ')).not.toContain('s3cret');
+    }
+    await manager.close();
+  });
+
+  it('removes the stored password when the connection is removed', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    const home = makeHome();
+    const secrets = new SecretsStore(home);
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await secrets.setPassword('devbox', 's3cret');
+    await manager.remove('devbox');
+    await expect(secrets.hasPassword('devbox')).resolves.toBe(false);
+    await manager.close();
+  });
+
+  it('treats an empty password as no password and never persists it', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    const home = makeHome();
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox', { password: '', savePassword: true });
+    await expect(new SecretsStore(home).hasPassword('devbox')).resolves.toBe(false);
+    const result = await manager.test('devbox', { password: '', savePassword: true });
+    expect(result.ok).toBe(true);
+    await expect(new SecretsStore(home).hasPassword('devbox')).resolves.toBe(false);
+    await manager.close();
+  });
+
+  it('setPassword persists a password for an existing connection', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.setPassword('devbox', 's3cret');
+    const [info] = await manager.list();
+    expect(info?.hasPassword).toBe(true);
+    await manager.setPassword('devbox', 'n3w-s3cret');
+    await manager.clearPassword('devbox');
+    const [cleared] = await manager.list();
+    expect(cleared?.hasPassword).toBe(false);
+    await manager.clearPassword('devbox');
+    await manager.close();
+  });
+
+  it('setPassword rejects unknown connections and empty passwords', async () => {
+    const runner = new FakeProcessRunner();
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const missing: unknown = await manager.setPassword('ghost', 's3cret').catch((error) => error);
+    expect(missing).toBeInstanceOf(SshRemoteError);
+    expect((missing as SshRemoteError).kind).toBe('config');
+    expect((missing as SshRemoteError).message).toContain('not found');
+    await expect(manager.setPassword('devbox', '')).rejects.toThrow(SshRemoteError);
+    const [info] = await manager.list();
+    expect(info?.hasPassword).toBe(false);
     await manager.close();
   });
 });

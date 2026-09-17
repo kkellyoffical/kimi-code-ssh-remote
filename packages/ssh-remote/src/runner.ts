@@ -10,6 +10,7 @@ export interface RunResult {
 
 export interface RunOptions {
   readonly timeoutMs?: number;
+  readonly env?: Record<string, string>;
 }
 
 export interface SpawnedProcess {
@@ -39,7 +40,11 @@ export function createSystemProcessRunner(): ProcessRunner {
         execFile(
           command,
           args,
-          { timeout: options.timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+          {
+            timeout: options.timeoutMs,
+            maxBuffer: 16 * 1024 * 1024,
+            env: options.env === undefined ? process.env : { ...process.env, ...options.env },
+          },
           (error, stdout, stderr) => {
             if (error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT') {
               reject(

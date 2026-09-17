@@ -1,11 +1,12 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { SshRemoteError } from '../src/errors';
+import { SshRemoteError, isNeedsPasswordError } from '../src/errors';
 import type { SshConnectionProfile } from '../src/profile';
+import type { RunResult } from '../src/runner';
 import { SshClient, classifySshError, shQuote } from '../src/ssh';
 
 import { FakeProcessRunner } from './fake-runner';
@@ -35,8 +36,9 @@ const PROFILE: SshConnectionProfile = {
 function makeClient(
   runner: FakeProcessRunner,
   profile: SshConnectionProfile = PROFILE,
+  password?: string,
 ): SshClient {
-  return new SshClient({ profile, runner, controlDir: makeControlDir() });
+  return new SshClient({ profile, runner, controlDir: makeControlDir(), password });
 }
 
 describe('SshClient', () => {
@@ -136,9 +138,125 @@ describe('SshClient', () => {
   });
 });
 
+describe('SshClient password authentication', () => {
+  const AUTH_FAILURE: RunResult = {
+    code: 255,
+    stdout: '',
+    stderr: 'alice@dev.example.com: Permission denied (publickey,password).',
+  };
+  const OK: RunResult = { code: 0, stdout: '', stderr: '' };
+
+  const batchOnly = (argv: readonly string[]): boolean => argv.includes('BatchMode=yes');
+
+  it('flags needsPassword when batch auth fails and no password is available', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = AUTH_FAILURE;
+    const client = makeClient(runner);
+    const error: unknown = await client.connect().catch((error) => error);
+    expect(error).toBeInstanceOf(SshRemoteError);
+    expect((error as SshRemoteError).kind).toBe('auth');
+    expect((error as SshRemoteError).needsPassword).toBe(true);
+    expect(isNeedsPasswordError(error)).toBe(true);
+    expect(runner.runs).toHaveLength(1);
+  });
+
+  it('treats an empty password as no password', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = AUTH_FAILURE;
+    const client = makeClient(runner, PROFILE, '');
+    const error: unknown = await client.connect().catch((error) => error);
+    expect(isNeedsPasswordError(error)).toBe(true);
+    expect(runner.runs).toHaveLength(1);
+  });
+
+  it('does not retry or flag needsPassword for non-auth failures', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = {
+      code: 255,
+      stdout: '',
+      stderr: 'ssh: Could not resolve hostname dev.example.com',
+    };
+    const client = makeClient(runner, PROFILE, 's3cret');
+    const error: unknown = await client.connect().catch((error) => error);
+    expect((error as SshRemoteError).kind).toBe('host-unreachable');
+    expect((error as SshRemoteError).needsPassword).toBe(false);
+    expect(isNeedsPasswordError(error)).toBe(false);
+    expect(runner.runs).toHaveLength(1);
+  });
+
+  it('retries through SSH_ASKPASS with the password in the environment, never in argv', async () => {
+    const runner = new FakeProcessRunner();
+    runner.onRun(/ssh/, (argv) => (batchOnly(argv) ? AUTH_FAILURE : OK));
+    const client = makeClient(runner, PROFILE, 's3cret');
+    await client.connect();
+    expect(runner.runs).toHaveLength(2);
+    const [batch, retry] = runner.runs;
+    expect(batch?.argv.join(' ')).toContain('BatchMode=yes');
+    expect(batch?.env).toBeUndefined();
+    expect(retry?.argv.join(' ')).not.toContain('BatchMode=yes');
+    expect(retry?.env?.['SSH_ASKPASS_REQUIRE']).toBe('force');
+    expect(retry?.env?.['KIMI_SSH_PASSWORD']).toBe('s3cret');
+    const askpass = retry?.env?.['SSH_ASKPASS'];
+    expect(askpass).toBeDefined();
+    expect(askpass).toContain('askpass-');
+    expect(existsSync(askpass ?? '')).toBe(false);
+    for (const run of runner.runs) {
+      expect(run.argv.join(' ')).not.toContain('s3cret');
+    }
+  });
+
+  it('flags needsPassword when the password retry also fails', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = AUTH_FAILURE;
+    const client = makeClient(runner, PROFILE, 'wr0ng');
+    const error: unknown = await client.connect().catch((error) => error);
+    expect(isNeedsPasswordError(error)).toBe(true);
+    expect(runner.runs).toHaveLength(2);
+    expect((error as SshRemoteError).message).not.toContain('wr0ng');
+    expect((error as SshRemoteError).stderr ?? '').not.toContain('wr0ng');
+  });
+
+  it('treats "Too many authentication failures" as an auth failure', async () => {
+    const failure: RunResult = {
+      code: 255,
+      stdout: '',
+      stderr: 'Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures',
+    };
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = failure;
+    const withoutPassword = makeClient(runner);
+    const error: unknown = await withoutPassword.connect().catch((error) => error);
+    expect((error as SshRemoteError).kind).toBe('auth');
+    expect(isNeedsPasswordError(error)).toBe(true);
+    runner.onRun(/ssh/, (argv) => (batchOnly(argv) ? failure : OK));
+    const withPassword = makeClient(runner, PROFILE, 's3cret');
+    await withPassword.connect();
+    expect(runner.runs.at(-1)?.env?.['KIMI_SSH_PASSWORD']).toBe('s3cret');
+  });
+
+  it('retries exec through SSH_ASKPASS on auth failure', async () => {
+    const runner = new FakeProcessRunner();
+    runner.onRun(/ssh/, (argv) =>
+      batchOnly(argv) ? AUTH_FAILURE : { code: 0, stdout: 'ok\n', stderr: '' },
+    );
+    const client = makeClient(runner, PROFILE, 's3cret');
+    await expect(client.execOrThrow('uname -a')).resolves.toBe('ok\n');
+    expect(runner.runs).toHaveLength(2);
+    expect(runner.runs[1]?.env?.['KIMI_SSH_PASSWORD']).toBe('s3cret');
+  });
+});
+
 describe('classifySshError', () => {
   const cases: Array<[string, { code: number; stderr: string }, string]> = [
     ['auth', { code: 255, stderr: 'Permission denied (publickey,password).' }, 'auth'],
+    [
+      'too many authentication failures',
+      {
+        code: 255,
+        stderr: 'Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures',
+      },
+      'auth',
+    ],
     [
       'host-unreachable',
       { code: 255, stderr: 'ssh: Could not resolve hostname x: nodename nor servname provided' },

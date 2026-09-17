@@ -6,9 +6,10 @@ import {
   type BootstrapOptions,
   type RemotePlatform,
 } from './bootstrap';
-import { SshRemoteError, errorMessage } from './errors';
+import { SshRemoteError, errorMessage, isNeedsPasswordError } from './errors';
 import { resolveKimiHome, type SshConnectionProfile, type SshConnectionProfileInput } from './profile';
 import { createSystemProcessRunner, type ProcessRunner } from './runner';
+import { SecretsStore } from './secrets';
 import { SshClient } from './ssh';
 import { ConnectionStore } from './store';
 import { SshTunnel, type SshTunnelTuning, type TunnelState } from './tunnel';
@@ -19,9 +20,15 @@ export interface SshConnectionStatus {
   readonly state: SshManagerState;
   readonly localOrigin?: string;
   readonly error?: string;
+  readonly needsPassword?: boolean;
 }
 
 export type SshConnectionSpec = SshConnectionProfileInput;
+
+export interface SshAuthOptions {
+  readonly password?: string;
+  readonly savePassword?: boolean;
+}
 
 export interface SshConnectionInfo {
   readonly name: string;
@@ -29,6 +36,7 @@ export interface SshConnectionInfo {
   readonly user?: string;
   readonly port: number;
   readonly identityFile?: string;
+  readonly hasPassword?: boolean;
   readonly status: SshConnectionStatus;
 }
 
@@ -38,6 +46,7 @@ export interface SshTestResult {
   readonly kimiPath?: string;
   readonly serverRunning?: boolean;
   readonly error?: string;
+  readonly needsPassword?: boolean;
 }
 
 export interface SshConnectionHandle {
@@ -49,8 +58,10 @@ export interface SshConnectionManager {
   list(): Promise<readonly SshConnectionInfo[]>;
   add(spec: SshConnectionSpec): Promise<SshConnectionInfo>;
   remove(name: string): Promise<void>;
-  test(name: string): Promise<SshTestResult>;
-  connect(name: string): Promise<SshConnectionHandle>;
+  setPassword(name: string, password: string): Promise<void>;
+  clearPassword(name: string): Promise<void>;
+  test(name: string, options?: SshAuthOptions): Promise<SshTestResult>;
+  connect(name: string, options?: SshAuthOptions): Promise<SshConnectionHandle>;
   disconnect(name: string): Promise<void>;
   status(name: string): SshConnectionStatus;
   close(): Promise<void>;
@@ -73,6 +84,7 @@ interface ManagedConnection {
   tunnel?: SshTunnel;
   handle?: SshConnectionHandle;
   error?: string;
+  needsPassword?: boolean;
   pending?: Promise<SshConnectionHandle>;
 }
 
@@ -82,15 +94,27 @@ export function createSshConnectionManager(
   const homeDir = options.homeDir ?? resolveKimiHome();
   const runner = options.runner ?? createSystemProcessRunner();
   const store = new ConnectionStore(homeDir);
+  const secrets = new SecretsStore(homeDir);
   const active = new Map<string, ManagedConnection>();
   let closed = false;
 
-  const clientFor = (profile: SshConnectionProfile): SshClient =>
+  const clientFor = (profile: SshConnectionProfile, password?: string): SshClient =>
     new SshClient({
       profile,
       runner,
       controlDir: join(homeDir, 'ssh', 'sockets'),
+      password,
     });
+
+  const resolvePassword = async (
+    name: string,
+    options?: SshAuthOptions,
+  ): Promise<string | undefined> => options?.password ?? (await secrets.getPassword(name));
+
+  const normalizeAuth = (options?: SshAuthOptions): SshAuthOptions | undefined => {
+    if (options?.password === undefined || options.password.length > 0) return options;
+    return { ...options, password: undefined };
+  };
 
   const statusOf = (name: string): SshConnectionStatus => {
     const entry = active.get(name);
@@ -99,6 +123,7 @@ export function createSshConnectionManager(
       state: entry.state,
       localOrigin: entry.handle?.localOrigin,
       error: entry.error,
+      needsPassword: entry.needsPassword,
     };
   };
 
@@ -128,7 +153,7 @@ export function createSshConnectionManager(
     }
   };
 
-  const connect = (name: string): Promise<SshConnectionHandle> => {
+  const connect = (name: string, options?: SshAuthOptions): Promise<SshConnectionHandle> => {
     if (closed) {
       return Promise.reject(new SshRemoteError('unknown', 'ssh connection manager is closed'));
     }
@@ -141,10 +166,11 @@ export function createSshConnectionManager(
     }
     const entry: ManagedConnection = { state: 'connecting' };
     active.set(name, entry);
-    const pending = establish(name, entry)
+    const pending = establish(name, entry, normalizeAuth(options))
       .catch((error: unknown) => {
         entry.state = 'error';
         entry.error = errorMessage(error);
+        entry.needsPassword = isNeedsPasswordError(error);
         throw error;
       })
       .finally(() => {
@@ -158,12 +184,16 @@ export function createSshConnectionManager(
   const establish = async (
     name: string,
     entry: ManagedConnection,
+    connectOptions?: SshAuthOptions,
   ): Promise<SshConnectionHandle> => {
     const profile = await requireProfile(name);
-    const client = clientFor(profile);
+    const client = clientFor(profile, await resolvePassword(name, connectOptions));
     entry.client = client;
     try {
       await client.connect();
+      if (connectOptions?.savePassword === true && connectOptions.password !== undefined) {
+        await secrets.setPassword(name, connectOptions.password);
+      }
       const boot = await bootstrapRemote({
         client,
         resolveLocalBinary: options.resolveLocalBinary,
@@ -200,6 +230,7 @@ export function createSshConnectionManager(
       entry.handle = handle;
       entry.state = 'on';
       entry.error = undefined;
+      entry.needsPassword = undefined;
       return handle;
     } catch (error) {
       await client.disconnect().catch(() => {});
@@ -218,14 +249,17 @@ export function createSshConnectionManager(
   return {
     async list() {
       const profiles = await store.list();
-      return profiles.map((profile) => ({
-        name: profile.name,
-        host: profile.host,
-        user: profile.user,
-        port: profile.port,
-        identityFile: profile.identityFile,
-        status: statusOf(profile.name),
-      }));
+      return Promise.all(
+        profiles.map(async (profile) => ({
+          name: profile.name,
+          host: profile.host,
+          user: profile.user,
+          port: profile.port,
+          identityFile: profile.identityFile,
+          hasPassword: await secrets.hasPassword(profile.name),
+          status: statusOf(profile.name),
+        })),
+      );
     },
     async add(spec) {
       const profile = await store.add(spec);
@@ -235,6 +269,7 @@ export function createSshConnectionManager(
         user: profile.user,
         port: profile.port,
         identityFile: profile.identityFile,
+        hasPassword: false,
         status: statusOf(profile.name),
       };
     },
@@ -244,13 +279,26 @@ export function createSshConnectionManager(
       if (!removed) {
         throw new SshRemoteError('config', `ssh connection "${name}" not found`);
       }
+      await secrets.removePassword(name);
     },
-    async test(name) {
+    async setPassword(name, password) {
+      await requireProfile(name);
+      await secrets.setPassword(name, password);
+    },
+    async clearPassword(name) {
+      await secrets.removePassword(name);
+    },
+    async test(name, testOptions) {
+      const auth = normalizeAuth(testOptions);
       const existing = active.get(name);
       const profile = await requireProfile(name);
-      const client = existing?.client ?? clientFor(profile);
+      const reusable = auth?.password === undefined ? existing?.client : undefined;
+      const client = reusable ?? clientFor(profile, await resolvePassword(name, auth));
       try {
         await client.connect();
+        if (auth?.savePassword === true && auth.password !== undefined) {
+          await secrets.setPassword(name, auth.password);
+        }
         const probe = await probeRemote(client);
         return {
           ok: true,
@@ -259,9 +307,13 @@ export function createSshConnectionManager(
           serverRunning: probe.serverRunning,
         };
       } catch (error) {
-        return { ok: false, error: errorMessage(error) };
+        return {
+          ok: false,
+          error: errorMessage(error),
+          needsPassword: isNeedsPasswordError(error) ? true : undefined,
+        };
       } finally {
-        if (existing === undefined) {
+        if (reusable === undefined) {
           await client.disconnect().catch(() => {});
         }
       }
