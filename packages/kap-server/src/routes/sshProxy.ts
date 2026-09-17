@@ -11,6 +11,7 @@ import { errEnvelope } from '../envelope';
 import { ErrorCode } from '../protocol/error-codes';
 
 const MAX_PROXY_BODY_BYTES = 10 * 1024 * 1024;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000;
 
 const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
   'connection',
@@ -35,6 +36,7 @@ const PROXY_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS
 
 export interface SshProxyRouteOptions {
   readonly service: SshConnectionManager;
+  readonly upstreamTimeoutMs?: number;
 }
 
 export async function registerSshProxyRoutes(
@@ -55,7 +57,12 @@ export async function registerSshProxyRoutes(
       ssh.addContentTypeParser('application/json', parserOpts, bufferParser);
       ssh.addContentTypeParser('text/plain', parserOpts, bufferParser);
       const handler = (req: FastifyRequest, reply: FastifyReply): Promise<void> =>
-        proxySshRequest(opts.service, req, reply);
+        proxySshRequest(
+          opts.service,
+          req,
+          reply,
+          opts.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS,
+        );
       ssh.route({ method: [...PROXY_METHODS], url: '/:name', schema: { hide: true }, handler });
       ssh.route({ method: [...PROXY_METHODS], url: '/:name/*', schema: { hide: true }, handler });
     },
@@ -67,6 +74,7 @@ async function proxySshRequest(
   service: SshConnectionManager,
   req: FastifyRequest,
   reply: FastifyReply,
+  upstreamTimeoutMs: number,
 ): Promise<void> {
   const { name } = req.params as { name: string };
   let handle;
@@ -115,24 +123,20 @@ async function proxySshRequest(
         method: req.method,
         path,
         headers: forwardHeaders,
+        timeout: upstreamTimeoutMs,
       },
       (res) => {
         responded = true;
         void sendUpstreamResponse(req, reply, res, publicPrefix).then(resolve);
       },
     );
-    upstream.once('error', () => {
+    upstream.once('timeout', () => {
+      upstream.destroy(new Error(`ssh connection "${name}" tunnel request timed out`));
+    });
+    upstream.once('error', (error) => {
       if (!responded) {
         responded = true;
-        void reply
-          .code(502)
-          .send(
-            errEnvelope(
-              ErrorCode.SSH_UNREACHABLE,
-              `ssh connection "${name}" tunnel endpoint refused the request`,
-              req.id,
-            ),
-          );
+        void reply.code(502).send(errEnvelope(ErrorCode.SSH_UNREACHABLE, error.message, req.id));
       }
       resolve();
     });
@@ -153,6 +157,8 @@ async function sendUpstreamResponse(
   const contentType = res.headers['content-type'] ?? '';
   const rewritable =
     req.method !== 'HEAD' &&
+    status !== 206 &&
+    res.headers['content-range'] === undefined &&
     res.headers['content-encoding'] === undefined &&
     isRewritableContentType(contentType);
   if (!rewritable) {

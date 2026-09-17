@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import Fastify from 'fastify';
 import { WebSocketServer } from 'ws';
 
 import { ErrorCode } from '../src/protocol/error-codes';
+import { registerSshProxyRoutes } from '../src/routes/sshProxy';
 import { type RunningServer, startServer } from '../src/start';
 import { authedFetch, bearerToken } from './helpers/auth';
 import { fakeSshConnectionManager, type FakeSshConnectionManager } from './helpers/fakeSshConnectionManager';
@@ -76,6 +78,14 @@ async function startFakeRemote(): Promise<FakeRemote> {
       if (url === '/assets/app.js') {
         res.writeHead(200, { 'content-type': 'application/javascript' });
         res.end('var u="/assets/chunk.js";load(u);');
+        return;
+      }
+      if (url === '/partial.html') {
+        res.writeHead(206, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-range': 'bytes 0-59/120',
+        });
+        res.end('<html><head></head><body><script src="/assets/app.js"></s');
         return;
       }
       if (url === '/big.bin') {
@@ -253,6 +263,17 @@ describe('server-v2 /ssh/{name} proxy', () => {
     expect(body.toString()).toBe('x'.repeat(100));
   });
 
+  it('streams 206 html responses with content-range through without rewriting', async () => {
+    const res = await authedFetch(server as RunningServer, base, '/ssh/alpha/partial.html', {
+      headers: { range: 'bytes=0-59' },
+    });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 0-59/120');
+    const body = await res.text();
+    expect(body).toContain('src="/assets/app.js"');
+    expect(body).not.toContain('/ssh/alpha/assets');
+  });
+
   it('streams full downloads without rewriting', async () => {
     const res = await authedFetch(server as RunningServer, base, '/ssh/alpha/big.bin');
     expect(res.status).toBe(200);
@@ -287,6 +308,43 @@ describe('server-v2 /ssh/{name} proxy', () => {
   it('rejects proxy requests without a token', async () => {
     const res = await fetch(`${base}/ssh/alpha/api/v1/echo`);
     expect(res.status).toBe(401);
+  });
+});
+
+describe('server-v2 /ssh/{name} proxy upstream timeout', () => {
+  it('maps a stalled tunnel endpoint to 502 SSH_UNREACHABLE after the upstream timeout', async () => {
+    const stall = createServer(() => {});
+    const stallPort = await new Promise<number>((resolve, reject) => {
+      stall.once('error', reject);
+      stall.listen(0, '127.0.0.1', () => {
+        const address = stall.address();
+        if (address === null || typeof address === 'string') reject(new Error('missing address'));
+        else resolve(address.port);
+      });
+    });
+    const fake = fakeSshConnectionManager({
+      handleFor: () => ({
+        localOrigin: `http://127.0.0.1:${stallPort}`,
+        remoteToken: REMOTE_TOKEN,
+      }),
+    });
+    await fake.add({ name: 'alpha', host: 'example.com' });
+    const app = Fastify({ logger: false });
+    await registerSshProxyRoutes(app, { service: fake, upstreamTimeoutMs: 200 });
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const address = app.server.address();
+    const port = typeof address === 'object' && address !== null ? address.port : 0;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/ssh/alpha/api/v1/echo`);
+      expect(res.status).toBe(502);
+      const envelope = (await res.json()) as { code: number; msg: string };
+      expect(envelope.code).toBe(ErrorCode.SSH_UNREACHABLE);
+      expect(envelope.msg).toContain('timed out');
+    } finally {
+      await app.close();
+      stall.closeAllConnections();
+      await new Promise<void>((resolve) => stall.close(() => resolve()));
+    }
   });
 });
 
