@@ -216,7 +216,7 @@ kimi ssh remove prod                   # 删除已保存的连接
 | `kimi ssh test <name>` | 发起 SSH 握手，报告远端平台、kimi 安装状态与服务状态 |
 | `kimi ssh connect <name>` | 建立隧道并打印远端 web UI 地址 |
 
-`connect` 有两种模式。默认模式（本地服务正在运行）下由本地服务持有隧道，命令会打印两个 URL：远端 web UI（本地 web UI 通过 `?kimi_origin=` 查询参数指向远端）和用于管理的本地 web UI。没有运行中的服务时（或使用 `--direct`），隧道由当前终端持有，按 `Ctrl+C` 断开，打印的 URL 指向隧道端口上远端自己的 web UI。`--no-open` 表示不自动打开浏览器。
+`connect` 有两种模式。默认模式（本地服务正在运行）下由本地服务持有隧道，命令会打印两个 URL：远端 web UI（本地 web UI 通过 `?kimi_origin=` 查询参数指向远端）和服务器内置的 `/ssh` 管理页。没有运行中的服务时（或使用 `--direct`），隧道由当前终端持有，按 `Ctrl+C` 断开，打印的 URL 指向隧道端口上远端自己的 web UI。`--no-open` 表示不自动打开浏览器。
 
 首次对一台新远端执行 `connect` 时，会自动在远端安装 Kimi Code CLI 并启动其 `kimi web` 服务；之后的连接直接复用这套环境。浏览器侧的使用流程见 [在浏览器中使用 Kimi Code](../guides/web.md#通过-ssh-在远程机器上工作)。
 

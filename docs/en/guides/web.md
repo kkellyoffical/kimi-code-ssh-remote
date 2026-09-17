@@ -86,7 +86,7 @@ The web UI can also drive a remote machine: the CLI keeps an SSH tunnel to the r
 
 `connect` prints and opens the remote web UI URL. The URL loads the local web UI with a `?kimi_origin=` query parameter pointing at the tunnel endpoint (`http://127.0.0.1:<port>/ssh/prod`), so every API request is forwarded through the SSH tunnel; the remote server's token is injected by the local server and never reaches the browser. The first connection to a fresh remote installs Kimi Code CLI there and starts its server automatically.
 
-Manage saved connections from the terminal: `kimi ssh list` shows each connection with its live status, `kimi ssh test prod` checks connectivity and the remote setup, and `kimi ssh remove prod` deletes one. When no local server is running, `kimi ssh connect prod --direct` holds the tunnel in the terminal instead and opens the remote's own web UI. For the full command reference, see [kimi ssh](../reference/kimi-command.md#kimi-ssh).
+Manage saved connections from the terminal: `kimi ssh list` shows each connection with its live status, `kimi ssh test prod` checks connectivity and the remote setup, and `kimi ssh remove prod` deletes one. The server also ships a built-in management page at `http://127.0.0.1:<port>/ssh` (append `#token=...` from the startup banner) for adding, testing, connecting, and opening connections from the browser. When no local server is running, `kimi ssh connect prod --direct` holds the tunnel in the terminal instead and opens the remote's own web UI. For the full command reference, see [kimi ssh](../reference/kimi-command.md#kimi-ssh).
 
 ## Security notes
 

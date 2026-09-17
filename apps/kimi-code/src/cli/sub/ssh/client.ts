@@ -82,17 +82,16 @@ export interface SshRestClientOptions {
 export function createSshRestClient(options: SshRestClientOptions): SshBackend {
   const fetchFn = options.fetchFn ?? fetch;
   const base = `${options.origin.replace(/\/$/, '')}/api/v1/ssh/connections`;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (options.token !== undefined) {
-    headers['Authorization'] = `Bearer ${options.token}`;
-  }
+  const authHeader: Record<string, string> =
+    options.token === undefined ? {} : { Authorization: `Bearer ${options.token}` };
 
   async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
     let response: Response;
     try {
       response = await fetchFn(`${base}${path}`, {
         method,
-        headers,
+        // Fastify rejects a JSON content-type on a bodyless request (400).
+        headers: body === undefined ? authHeader : { ...authHeader, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (error) {
@@ -124,14 +123,14 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
       return data.connections.map(fromWire);
     },
     async add(spec: SshConnectionSpec) {
-      const data = await call<{ connection: WireConnection }>('POST', '', {
+      const data = await call<WireConnection>('POST', '', {
         name: spec.name,
         host: spec.host,
         user: spec.user,
         port: spec.port,
         identity_file: spec.identityFile,
       });
-      return fromWire(data.connection);
+      return fromWire(data);
     },
     async remove(name) {
       await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}`);

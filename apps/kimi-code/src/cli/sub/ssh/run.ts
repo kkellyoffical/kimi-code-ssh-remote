@@ -29,11 +29,12 @@ import {
 import { getDataDir } from '#/utils/paths';
 import { openUrl as defaultOpenUrl } from '#/utils/open-url';
 
-import { browserOpenOrigin, buildOpenableUrl } from '../web/access-urls';
+import { browserOpenOrigin } from '../web/access-urls';
 import { parsePort, tryResolveServerToken } from '../web/shared';
 import { createSshRestClient, type SshBackend } from './client';
 import {
   buildSshDirectUrl,
+  buildSshManageUrl,
   buildSshProxyUrl,
   formatConnectDirectBanner,
   formatConnectProxyBanner,
@@ -268,7 +269,7 @@ async function connectViaServer(
     `${formatConnectProxyBanner({
       name: options.name,
       target: info !== undefined ? sshTarget(info) : 'saved connection',
-      manageUrl: buildOpenableUrl(openOrigin, token),
+      manageUrl: buildSshManageUrl(openOrigin, token),
       remoteUrl,
       opened: options.open === true,
     })}\n`,

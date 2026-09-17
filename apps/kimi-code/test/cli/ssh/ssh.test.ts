@@ -20,6 +20,7 @@ import {
   type SshConnectionManager,
   type SshTestResult,
 } from '@moonshot-ai/ssh-remote';
+import chalk from 'chalk';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -27,7 +28,9 @@ import { registerSshCommand } from '#/cli/sub/ssh';
 import { createSshRestClient, SshApiError, type SshBackend } from '#/cli/sub/ssh/client';
 import {
   buildSshDirectUrl,
+  buildSshManageUrl,
   buildSshProxyUrl,
+  formatConnectionTable,
   sshErrorHint,
 } from '#/cli/sub/ssh/format';
 import {
@@ -40,7 +43,7 @@ import {
 } from '#/cli/sub/ssh/run';
 
 function stripAnsi(text: string): string {
-  return text.replaceAll(/\[[0-9;]*m/g, '');
+  return text.replaceAll(/\u001B\[[0-9;]*m/g, '');
 }
 
 function makeIo(): {
@@ -337,6 +340,30 @@ describe('kimi ssh list', () => {
     expect(io.readStdout()).toContain('local registry only');
   });
 
+  it('keeps header and data columns aligned when state cells are ANSI-colored', () => {
+    const previousLevel = chalk.level;
+    chalk.level = 3;
+    try {
+      const table = formatConnectionTable([
+        {
+          name: 'prod',
+          host: 'example.com',
+          user: 'ubuntu',
+          port: 22,
+          identityFile: undefined,
+          status: { state: 'on', localOrigin: 'http://127.0.0.1:49001', error: undefined },
+        },
+      ]);
+      const lines = table.split('\n').map((line) => stripAnsi(line));
+      const header = lines[0]!;
+      const row = lines[1]!;
+      expect(header).toContain('ENDPOINT / ERROR');
+      expect(row.indexOf('http://127.0.0.1:49001')).toBe(header.indexOf('ENDPOINT / ERROR'));
+    } finally {
+      chalk.level = previousLevel;
+    }
+  });
+
   it('prints an add hint when nothing is saved', async () => {
     const { deps, io } = makeDeps();
     await handleSshList(deps);
@@ -464,7 +491,7 @@ describe('kimi ssh connect', () => {
     const expectedRemote =
       'http://127.0.0.1:58627/?kimi_origin=http://127.0.0.1:58627/ssh/prod#token=local-token';
     expect(out).toContain(expectedRemote);
-    expect(out).toContain('http://127.0.0.1:58627/#token=local-token');
+    expect(out).toContain('http://127.0.0.1:58627/ssh#token=local-token');
     expect(opened).toEqual([expectedRemote]);
   });
 
@@ -563,6 +590,15 @@ describe('url builders', () => {
       'http://127.0.0.1:49001/#token=rtok',
     );
   });
+
+  it('builds the /ssh management page URL with the token fragment', () => {
+    expect(buildSshManageUrl('http://127.0.0.1:58627', 'tok')).toBe(
+      'http://127.0.0.1:58627/ssh#token=tok',
+    );
+    expect(buildSshManageUrl('http://127.0.0.1:58627/', undefined)).toBe(
+      'http://127.0.0.1:58627/ssh',
+    );
+  });
 });
 
 describe('sshErrorHint', () => {
@@ -650,7 +686,11 @@ describe('ssh REST client', () => {
         calls.push({ url, init });
         return jsonResponse(
           envelope({
-            connection: { name: 'prod', host: 'example.com', user: 'ubuntu', port: 2222 },
+            name: 'prod',
+            host: 'example.com',
+            user: 'ubuntu',
+            port: 2222,
+            status: { state: 'off' },
           }),
         );
       }),
@@ -695,6 +735,21 @@ describe('ssh REST client', () => {
       error: undefined,
     });
     expect(await client.connect('prod')).toEqual({ localOrigin: 'http://127.0.0.1:49001' });
+  });
+
+  it('sends no JSON content-type on bodyless requests', async () => {
+    const seen: Record<string, string>[] = [];
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async (_url, init) => {
+        seen.push((init.headers ?? {}) as Record<string, string>);
+        return jsonResponse(envelope({ name: 'prod' }));
+      }),
+    });
+    await client.remove('prod');
+    expect(seen[0]?.['Authorization']).toBe('Bearer tok');
+    expect(seen[0]?.['Content-Type']).toBeUndefined();
   });
 
   it('raises SshApiError with the server error code on failure envelopes', async () => {

@@ -61,7 +61,7 @@ export function formatConnectionTable(connections: readonly SshConnectionInfo[])
 }
 
 function stripAnsiLength(text: string): number {
-  return text.replaceAll(/\[[0-9;]*m/g, '').length;
+  return text.replaceAll(/\u001B\[[0-9;]*m/g, '').length;
 }
 
 function padAnsi(text: string, width: number): string {
@@ -91,6 +91,16 @@ export function buildSshDirectUrl(localOrigin: string, remoteToken: string): str
   return `${base}/#token=${remoteToken}`;
 }
 
+/**
+ * The server's built-in SSH connections management page (`GET /ssh`): add,
+ * test, connect, and open connections from the browser. The local bearer
+ * token rides in the `#token=` fragment, which the page reads from the URL.
+ */
+export function buildSshManageUrl(serverOpenOrigin: string, token: string | undefined): string {
+  const base = serverOpenOrigin.endsWith('/') ? serverOpenOrigin.slice(0, -1) : serverOpenOrigin;
+  return token === undefined ? `${base}/ssh` : `${base}/ssh#token=${token}`;
+}
+
 export function formatConnectProxyBanner(options: {
   name: string;
   target: string;
@@ -102,7 +112,7 @@ export function formatConnectProxyBanner(options: {
     `${ok('SSH connection ready:')} ${strong(options.name)} ${dim(`(${options.target})`)}`,
     '',
     `  ${dim('Remote web UI:')}  ${url(options.remoteUrl)}`,
-    `  ${dim('Local web UI:')}   ${url(options.manageUrl)}`,
+    `  ${dim('Manage page:')}    ${url(options.manageUrl)}`,
     '',
     options.opened
       ? dim('Opened the remote web UI in your browser.')

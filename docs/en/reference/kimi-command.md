@@ -216,7 +216,7 @@ kimi ssh remove prod                   # delete a saved connection
 | `kimi ssh test <name>` | Run an SSH handshake and report the remote platform, kimi install state, and server state |
 | `kimi ssh connect <name>` | Establish the tunnel and print the remote web UI URL |
 
-`connect` has two modes. With a running local server (the default), the server holds the tunnel and the command prints two URLs: the remote web UI (the local web UI pointed at the remote through the `?kimi_origin=` query parameter) and the local web UI for management. Without a server — or with `--direct` — this terminal holds the tunnel until `Ctrl+C`, and the printed URL points at the remote's own web UI on the tunnel port. `--no-open` skips opening the browser.
+`connect` has two modes. With a running local server (the default), the server holds the tunnel and the command prints two URLs: the remote web UI (the local web UI pointed at the remote through the `?kimi_origin=` query parameter) and the server's built-in `/ssh` management page. Without a server — or with `--direct` — this terminal holds the tunnel until `Ctrl+C`, and the printed URL points at the remote's own web UI on the tunnel port. `--no-open` skips opening the browser.
 
 The first `connect` to a fresh remote installs the Kimi Code CLI binary there and starts its `kimi web` server automatically; later connections reuse that setup. See [Using Kimi Code in the browser](../guides/web.md#working-on-remote-machines-over-ssh) for the browser-side flow.
 
