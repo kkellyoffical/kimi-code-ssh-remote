@@ -39,6 +39,7 @@ import { registerSessionsRoutes } from './sessions';
 import { registerShutdownRoutes } from './shutdown';
 import { registerSnapshotRoutes } from './snapshot';
 import { registerSkillsRoutes } from './skills';
+import { registerSshConnectionsRoutes, type SshConnectionsRouteOptions } from './sshConnections';
 import { registerTasksRoutes } from './tasks';
 import { registerTerminalsRoutes } from './terminals';
 import { registerToolsRoutes } from './tools';
@@ -77,6 +78,7 @@ export interface RegisterApiV1RoutesOptions {
   readonly pluginMarketplaceUrl: () => string;
   readonly pluginMarketplaceIsDefault: boolean;
   readonly remoteControl: RemoteControlRouteOptions;
+  readonly sshConnections: SshConnectionsRouteOptions;
   readonly dangerousBypassAuth?: boolean;
   readonly webTitle?: string;
 }
@@ -168,6 +170,10 @@ export async function registerApiV1Routes(
       registerRemoteControlRoutes(
         apiV1 as unknown as Parameters<typeof registerRemoteControlRoutes>[0],
         opts.remoteControl,
+      );
+      registerSshConnectionsRoutes(
+        apiV1 as unknown as Parameters<typeof registerSshConnectionsRoutes>[0],
+        opts.sshConnections,
       );
       registerWorkspacesRoutes(
         apiV1 as unknown as Parameters<typeof registerWorkspacesRoutes>[0],

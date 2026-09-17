@@ -66,4 +66,38 @@ describe('server-v2 /api/v1 bearer auth', () => {
     const res = await server!.app.inject({ method: 'GET', url: '/openapi.json' });
     expect(res.statusCode).toBe(401);
   });
+
+  it('serves the /ssh management page without a token', async () => {
+    const res = await server!.app.inject({ method: 'GET', url: '/ssh' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
+  });
+
+  it('rejects /ssh proxy paths without a token', async () => {
+    const res = await server!.app.inject({ method: 'GET', url: '/ssh/alpha/api/v1/healthz' });
+    expect(res.statusCode).toBe(401);
+    const body = res.json() as Record<string, unknown>;
+    expect(body['code']).toBe(40101);
+  });
+
+  it('rejects /ssh proxy paths with a wrong token', async () => {
+    const res = await server!.app.inject({
+      method: 'GET',
+      url: '/ssh/alpha/api/v1/healthz',
+      headers: { authorization: 'Bearer wrong-token' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('accepts /ssh proxy paths with the persistent token', async () => {
+    const token = server!.authTokenService.getToken();
+    const res = await server!.app.inject({
+      method: 'GET',
+      url: '/ssh/alpha/api/v1/healthz',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(404);
+    const body = res.json() as Record<string, unknown>;
+    expect(body['code']).toBe(40421);
+  });
 });

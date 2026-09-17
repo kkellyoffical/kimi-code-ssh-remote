@@ -40,7 +40,7 @@ function defaultIsBypassed(req: FastifyRequest): boolean {
   if (req.method === 'GET' && path === '/api/v1/healthz') {
     return true;
   }
-  const isApi = path.startsWith('/api/');
+  const isApi = path.startsWith('/api/') || path.startsWith('/ssh/');
   const isMeta = path === '/openapi.json' || path === '/asyncapi.json';
   return !isApi && !isMeta;
 }
