@@ -38,6 +38,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "DELETE",
+      "/api/v1/ssh/connections/{name}/password",
+    ],
+    [
+      "DELETE",
       "/api/v1/workspaces/{workspace_id}",
     ],
     [
@@ -119,6 +123,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "GET",
       "/api/v1/fs:home",
+    ],
+    [
+      "GET",
+      "/api/v1/fs:list",
     ],
     [
       "GET",
@@ -526,6 +534,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "POST",
+      "/api/v1/ssh/connections/{name}/password",
+    ],
+    [
+      "POST",
       "/api/v1/ssh/connections/{name}/test",
     ],
     [
@@ -590,7 +602,15 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "PUT",
+      "/api/v1/fs:content",
+    ],
+    [
+      "PUT",
       "/api/v1/providers/{provider_id}",
+    ],
+    [
+      "PUT",
+      "/api/v1/ssh/connections/{name}/password",
     ],
     [
       "PUT",
