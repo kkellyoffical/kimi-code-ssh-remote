@@ -406,4 +406,48 @@ describe('SshConnectionManager', () => {
     await expect(secrets.hasPassword('devbox')).resolves.toBe(false);
     await manager.close();
   });
+
+  it('treats an empty password as no password and never persists it', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    const home = makeHome();
+    const manager = makeManager(runner, 49160, undefined, {}, home);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox', { password: '', savePassword: true });
+    await expect(new SecretsStore(home).hasPassword('devbox')).resolves.toBe(false);
+    const result = await manager.test('devbox', { password: '', savePassword: true });
+    expect(result.ok).toBe(true);
+    await expect(new SecretsStore(home).hasPassword('devbox')).resolves.toBe(false);
+    await manager.close();
+  });
+
+  it('setPassword persists a password for an existing connection', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.setPassword('devbox', 's3cret');
+    const [info] = await manager.list();
+    expect(info?.hasPassword).toBe(true);
+    await manager.setPassword('devbox', 'n3w-s3cret');
+    await manager.clearPassword('devbox');
+    const [cleared] = await manager.list();
+    expect(cleared?.hasPassword).toBe(false);
+    await manager.clearPassword('devbox');
+    await manager.close();
+  });
+
+  it('setPassword rejects unknown connections and empty passwords', async () => {
+    const runner = new FakeProcessRunner();
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const missing: unknown = await manager.setPassword('ghost', 's3cret').catch((error) => error);
+    expect(missing).toBeInstanceOf(SshRemoteError);
+    expect((missing as SshRemoteError).kind).toBe('config');
+    expect((missing as SshRemoteError).message).toContain('not found');
+    await expect(manager.setPassword('devbox', '')).rejects.toThrow(SshRemoteError);
+    const [info] = await manager.list();
+    expect(info?.hasPassword).toBe(false);
+    await manager.close();
+  });
 });

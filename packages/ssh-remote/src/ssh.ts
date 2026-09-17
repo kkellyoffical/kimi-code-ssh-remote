@@ -211,7 +211,7 @@ export function classifySshError(result: RunResult): SshErrorKind {
   if (result.code === 127 || /command not found/i.test(stderr)) {
     return 'remote-missing-binary';
   }
-  if (/permission denied/i.test(stderr)) {
+  if (/permission denied|too many authentication failures/i.test(stderr)) {
     return 'auth';
   }
   if (

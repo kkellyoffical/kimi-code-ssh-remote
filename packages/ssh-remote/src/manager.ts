@@ -58,6 +58,8 @@ export interface SshConnectionManager {
   list(): Promise<readonly SshConnectionInfo[]>;
   add(spec: SshConnectionSpec): Promise<SshConnectionInfo>;
   remove(name: string): Promise<void>;
+  setPassword(name: string, password: string): Promise<void>;
+  clearPassword(name: string): Promise<void>;
   test(name: string, options?: SshAuthOptions): Promise<SshTestResult>;
   connect(name: string, options?: SshAuthOptions): Promise<SshConnectionHandle>;
   disconnect(name: string): Promise<void>;
@@ -109,6 +111,11 @@ export function createSshConnectionManager(
     options?: SshAuthOptions,
   ): Promise<string | undefined> => options?.password ?? (await secrets.getPassword(name));
 
+  const normalizeAuth = (options?: SshAuthOptions): SshAuthOptions | undefined => {
+    if (options?.password === undefined || options.password.length > 0) return options;
+    return { ...options, password: undefined };
+  };
+
   const statusOf = (name: string): SshConnectionStatus => {
     const entry = active.get(name);
     if (entry === undefined) return { state: 'off' };
@@ -159,7 +166,7 @@ export function createSshConnectionManager(
     }
     const entry: ManagedConnection = { state: 'connecting' };
     active.set(name, entry);
-    const pending = establish(name, entry, options)
+    const pending = establish(name, entry, normalizeAuth(options))
       .catch((error: unknown) => {
         entry.state = 'error';
         entry.error = errorMessage(error);
@@ -274,15 +281,23 @@ export function createSshConnectionManager(
       }
       await secrets.removePassword(name);
     },
+    async setPassword(name, password) {
+      await requireProfile(name);
+      await secrets.setPassword(name, password);
+    },
+    async clearPassword(name) {
+      await secrets.removePassword(name);
+    },
     async test(name, testOptions) {
+      const auth = normalizeAuth(testOptions);
       const existing = active.get(name);
       const profile = await requireProfile(name);
-      const reusable = testOptions?.password === undefined ? existing?.client : undefined;
-      const client = reusable ?? clientFor(profile, await resolvePassword(name, testOptions));
+      const reusable = auth?.password === undefined ? existing?.client : undefined;
+      const client = reusable ?? clientFor(profile, await resolvePassword(name, auth));
       try {
         await client.connect();
-        if (testOptions?.savePassword === true && testOptions.password !== undefined) {
-          await secrets.setPassword(name, testOptions.password);
+        if (auth?.savePassword === true && auth.password !== undefined) {
+          await secrets.setPassword(name, auth.password);
         }
         const probe = await probeRemote(client);
         return {
