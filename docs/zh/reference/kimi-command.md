@@ -198,11 +198,12 @@ kimi web --port 58628    # 指定绑定端口
 
 ### `kimi ssh`
 
-管理 SSH 远程连接，并通过本地隧道在浏览器中打开远程机器的 web UI。连接保存在 `~/.kimi-code/ssh/connections.json`。当本地服务（`kimi web`）正在运行时，CLI 会通过该服务操作，使终端与 web UI 共享同一批隧道；没有运行中的服务时，`kimi ssh` 直接读写本地注册表。
+管理 SSH 远程连接，并通过本地隧道在浏览器中打开远程机器的 web UI。连接保存在 `~/.kimi-code/ssh/connections.json`，已保存的密码保存在 `~/.kimi-code/ssh/secrets.json`。当本地服务（`kimi web`）正在运行时，CLI 会通过该服务操作，使终端与 web UI 共享同一批隧道；没有运行中的服务时，`kimi ssh` 直接读写本地注册表。
 
 ```sh
-kimi ssh add prod ubuntu@example.com   # 保存连接
-kimi ssh list                          # 已保存的连接及实时状态
+kimi ssh add prod ubuntu@example.com   # 保存连接（自动探测并打印认证状态）
+kimi ssh list                          # 已保存的连接、认证方式及实时状态
+kimi ssh passwd prod                   # 保存连接的密码（隐藏输入）
 kimi ssh test prod                     # 探测连通性与远端环境
 kimi ssh connect prod                  # 建立隧道并打开远端 web UI
 kimi ssh remove prod                   # 删除已保存的连接
@@ -210,15 +211,28 @@ kimi ssh remove prod                   # 删除已保存的连接
 
 | 命令 | 说明 |
 | --- | --- |
-| `kimi ssh add <name> [target]` | 保存连接；`target` 为 `[user@]host`，可搭配 `--port`、`--identity-file`、`--user`。在终端中不带 `target` 运行时会逐项提示输入 |
-| `kimi ssh list` | 列出已保存的连接及实时状态（已连接时显示端点，失败时显示最近错误） |
+| `kimi ssh add <name> [target]` | 保存连接，随后自动探测并打印认证状态；`target` 为 `[user@]host`，可搭配 `--port`、`--identity-file`、`--user`、`--password`、`--save-password`。在终端中不带 `target` 运行时会逐项提示输入 |
+| `kimi ssh list` | 列出已保存的连接及其认证方式（`AUTH` 列）和实时状态（已连接时显示端点，失败时显示最近错误） |
+| `kimi ssh passwd <name>` | 通过隐藏输入保存连接的密码；`--clear` 清除已保存的密码 |
 | `kimi ssh remove <name>` | 删除已保存的连接，若已连接则先断开 |
-| `kimi ssh test <name>` | 发起 SSH 握手，报告远端平台、kimi 安装状态与服务状态 |
-| `kimi ssh connect <name>` | 建立隧道并打印远端 web UI 地址 |
+| `kimi ssh test <name>` | 发起 SSH 握手，报告远端平台、kimi 安装状态与服务状态；`--password` 先提示输入密码 |
+| `kimi ssh connect <name>` | 建立隧道并打印远端 web UI 地址；`--password` 先提示输入密码 |
 
 `connect` 有两种模式。默认模式（本地服务正在运行）下由本地服务持有隧道，命令会打印两个 URL：远端 web UI（本地 web UI 通过 `?kimi_origin=` 查询参数指向远端）和服务器内置的 `/ssh` 管理页。没有运行中的服务时（或使用 `--direct`），隧道由当前终端持有，按 `Ctrl+C` 断开，打印的 URL 指向隧道端口上远端自己的 web UI。`--no-open` 表示不自动打开浏览器。
 
 首次对一台新远端执行 `connect` 时，会自动在远端安装 Kimi Code CLI 并启动其 `kimi web` 服务；之后的连接直接复用这套环境。浏览器侧的使用流程见 [在浏览器中使用 Kimi Code](../guides/web.md#通过-ssh-在远程机器上工作)。
+
+#### 认证方式
+
+每次连接都会先尝试公钥认证——ssh-agent、默认密钥文件、已保存的 `--identity-file` 密钥以及 ssh config 配置。如果远端仍要求密码，行为取决于终端：交互式终端会用隐藏输入提示输入密码（密码一律不作为命令行参数传入，因此不会留在 shell 历史或进程列表中），然后重试一次；非交互环境则直接报错，并给出下面几种处理方式。
+
+- **密钥认证（默认）**：把密钥加载到 ssh-agent（`ssh-add`），或在保存连接时加 `--identity-file <path>`，无需其他配置。
+- **每次输入密码**：`kimi ssh connect prod --password`（或 `kimi ssh test prod --password`）会在尝试连接前提示输入。不加该选项时，只要公钥认证失败也会出现密码提示；输入并验证成功后，CLI 会询问是否记住密码。
+- **保存密码**：`kimi ssh passwd prod` 保存密码，之后的 `connect` 和 `test` 会自动使用；`kimi ssh passwd prod --clear` 删除已保存的密码。添加连接时用 `kimi ssh add prod <host> --password --save-password` 也能直接存密。
+
+::: warning 注意
+已保存的密码以明文存放在 `~/.kimi-code/ssh/secrets.json`（文件权限 `0600`）。任何能读到该文件的人都能读到密码，因此在多人共用的机器上请优先使用密钥认证；保存密码永远是显式选择，不会自动发生。
+:::
 
 ### `kimi install-desktop`
 

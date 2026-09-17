@@ -198,11 +198,12 @@ Generate a new persistent bearer token (written to `~/.kimi-code/server.token`);
 
 ### `kimi ssh`
 
-Manage SSH remote connections and open a remote machine's web UI through a local tunnel. Connections are saved under `~/.kimi-code/ssh/connections.json`. When a local server (`kimi web`) is running, the CLI operates through it, so the terminal and the web UI share the same live tunnels; otherwise `kimi ssh` works against the local registry directly.
+Manage SSH remote connections and open a remote machine's web UI through a local tunnel. Connections are saved under `~/.kimi-code/ssh/connections.json`, saved passwords under `~/.kimi-code/ssh/secrets.json`. When a local server (`kimi web`) is running, the CLI operates through it, so the terminal and the web UI share the same live tunnels; otherwise `kimi ssh` works against the local registry directly.
 
 ```sh
-kimi ssh add prod ubuntu@example.com   # save a connection
-kimi ssh list                          # saved connections + live status
+kimi ssh add prod ubuntu@example.com   # save a connection (probes it and prints the auth status)
+kimi ssh list                          # saved connections + auth method + live status
+kimi ssh passwd prod                   # save the connection's password (hidden prompt)
 kimi ssh test prod                     # probe connectivity and the remote setup
 kimi ssh connect prod                  # establish the tunnel and open the remote web UI
 kimi ssh remove prod                   # delete a saved connection
@@ -210,15 +211,28 @@ kimi ssh remove prod                   # delete a saved connection
 
 | Command | Description |
 | --- | --- |
-| `kimi ssh add <name> [target]` | Save a connection; `target` is `[user@]host`, with `--port`, `--identity-file`, and `--user` as options. Run without `target` in a terminal to be prompted field by field |
-| `kimi ssh list` | List saved connections with their live status (endpoint when connected, last error when failed) |
+| `kimi ssh add <name> [target]` | Save a connection, then probe it and print the authentication status; `target` is `[user@]host`, with `--port`, `--identity-file`, `--user`, `--password`, and `--save-password` as options. Run without `target` in a terminal to be prompted field by field |
+| `kimi ssh list` | List saved connections with their auth method (`AUTH` column) and live status (endpoint when connected, last error when failed) |
+| `kimi ssh passwd <name>` | Save the connection's password via a hidden prompt; `--clear` removes the saved password |
 | `kimi ssh remove <name>` | Delete a saved connection, disconnecting it first when connected |
-| `kimi ssh test <name>` | Run an SSH handshake and report the remote platform, kimi install state, and server state |
-| `kimi ssh connect <name>` | Establish the tunnel and print the remote web UI URL |
+| `kimi ssh test <name>` | Run an SSH handshake and report the remote platform, kimi install state, and server state; `--password` prompts for a password first |
+| `kimi ssh connect <name>` | Establish the tunnel and print the remote web UI URL; `--password` prompts for a password first |
 
 `connect` has two modes. With a running local server (the default), the server holds the tunnel and the command prints two URLs: the remote web UI (the local web UI pointed at the remote through the `?kimi_origin=` query parameter) and the server's built-in `/ssh` management page. Without a server — or with `--direct` — this terminal holds the tunnel until `Ctrl+C`, and the printed URL points at the remote's own web UI on the tunnel port. `--no-open` skips opening the browser.
 
 The first `connect` to a fresh remote installs the Kimi Code CLI binary there and starts its `kimi web` server automatically; later connections reuse that setup. See [Using Kimi Code in the browser](../guides/web.md#working-on-remote-machines-over-ssh) for the browser-side flow.
+
+#### Authentication
+
+Every connection attempt tries public-key authentication first — the ssh-agent, default key files, the `--identity-file` key when one is saved, and ssh config entries. When the remote still asks for a password, the behavior depends on the terminal: an interactive run prompts with hidden input (the password is never accepted as a command-line value, so it stays out of shell history and process listings) and retries once; a non-interactive run fails with a message naming the options below.
+
+- **Key-based (default)**: load a key into the ssh-agent (`ssh-add`), or save the connection with `--identity-file <path>`. Nothing else to configure.
+- **Password, entered per run**: `kimi ssh connect prod --password` (or `kimi ssh test prod --password`) prompts before the attempt. Without the flag, the prompt still appears whenever public-key auth fails; after a successful entry the CLI asks whether to remember the password.
+- **Password, saved**: `kimi ssh passwd prod` stores the password so later `connect` and `test` runs use it automatically; `kimi ssh passwd prod --clear` removes it. `kimi ssh add prod <host> --password --save-password` does the same while adding.
+
+::: warning
+Saved passwords are stored as plaintext in `~/.kimi-code/ssh/secrets.json` (file mode `0600`). Anyone who can read that file can read the passwords, so prefer key-based authentication on shared machines; saving a password is always opt-in.
+:::
 
 ### `kimi install-desktop`
 

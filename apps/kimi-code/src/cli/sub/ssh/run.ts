@@ -9,17 +9,28 @@
  * the tunnel (proxy mode) and exits; without one (or with `--direct`) it holds
  * the tunnel in this process until Ctrl+C.
  *
+ * Password authentication: every password is entered through a hidden-echo
+ * prompt (`promptSecret`), never as a command-line value. `test`/`connect`
+ * first try public-key auth; on a needs-password failure an interactive
+ * terminal prompts for a password (offering to save it to the secrets store)
+ * and retries once, while a non-interactive run fails with an actionable
+ * message.
+ *
  * Every collaborator behind `SshCommandDeps` is injectable so tests never
  * touch a real server, registry, or ssh binary.
  */
 
+import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
 import type { ServerInstanceInfo } from '@moonshot-ai/kap-server';
 import { getLiveServerInstance } from '@moonshot-ai/kap-server';
 import {
   createSshConnectionManager,
+  errorMessage,
+  isNeedsPasswordError,
   sshConnectionProfileSchema,
+  type SshAuthOptions,
   type SshConnectionInfo,
   type SshConnectionManager,
   type SshConnectionSpec,
@@ -31,17 +42,25 @@ import { openUrl as defaultOpenUrl } from '#/utils/open-url';
 
 import { browserOpenOrigin } from '../web/access-urls';
 import { parsePort, tryResolveServerToken } from '../web/shared';
-import { createSshRestClient, type SshBackend } from './client';
+import {
+  createSshRestClient,
+  SSH_AUTH_REQUIRED_CODE,
+  SshApiError,
+  type SshBackend,
+} from './client';
 import {
   buildSshDirectUrl,
   buildSshManageUrl,
   buildSshProxyUrl,
+  formatAddAuthLine,
   formatConnectDirectBanner,
   formatConnectProxyBanner,
   formatConnectionTable,
+  formatNeedsPasswordError,
   SSH_LIST_EMPTY_HINT,
   sshTarget,
 } from './format';
+import { readSecretLine } from './secret-prompt';
 
 export interface SshCommandDeps {
   homeDir: string;
@@ -55,6 +74,10 @@ export interface SshCommandDeps {
   openUrl: (url: string) => void;
   /** Interactive prompt; only used by `add` when the target is omitted. */
   prompt: (question: string) => Promise<string>;
+  /** Hidden-echo password entry; requires an interactive terminal. */
+  promptSecret: (question: string) => Promise<string>;
+  /** Yes/no question; resolves true only for an explicit yes. */
+  confirm: (question: string) => Promise<boolean>;
   isInteractive: () => boolean;
   /** Blocks until SIGINT/SIGTERM, then runs the shutdown callback. */
   holdForeground: (onShutdown: (reason: string) => Promise<void>) => Promise<void>;
@@ -95,31 +118,158 @@ async function resolveBackend(deps: SshCommandDeps): Promise<{
   return { backend: localManager(deps), server: undefined };
 }
 
+/** Where saved passwords live; printed so users can judge the risk. */
+function secretsFilePath(deps: SshCommandDeps): string {
+  return join(deps.homeDir, 'ssh', 'secrets.json');
+}
+
+/** Unified needs-password detection across the REST and local backends. */
+function errorNeedsPassword(error: unknown): boolean {
+  if (error instanceof SshApiError) return error.code === SSH_AUTH_REQUIRED_CODE;
+  return isNeedsPasswordError(error);
+}
+
+/**
+ * Run a connection test, folding a thrown needs-password failure (REST maps
+ * it to an error envelope) into the result shape the local manager returns.
+ */
+async function runTest(
+  backend: SshBackend,
+  name: string,
+  auth?: SshAuthOptions,
+): Promise<SshTestResult> {
+  try {
+    return await backend.test(name, auth);
+  } catch (error) {
+    if (errorNeedsPassword(error)) {
+      return { ok: false, needsPassword: true, error: errorMessage(error) };
+    }
+    throw error;
+  }
+}
+
+async function targetLabel(backend: SshBackend, name: string): Promise<string> {
+  const info = await findConnection(backend, name);
+  return info === undefined ? name : sshTarget(info);
+}
+
+/** Hidden-echo password entry plus the opt-in "remember" question. */
+async function promptPasswordAuth(
+  deps: SshCommandDeps,
+  label: string,
+): Promise<SshAuthOptions> {
+  const password = await deps.promptSecret(`Password for ${label}: `);
+  if (password.length === 0) {
+    throw new Error('no password entered — aborted');
+  }
+  const savePassword = await deps.confirm(
+    `Remember this password? It is stored as plaintext in ${secretsFilePath(deps)} (mode 0600)`,
+  );
+  return { password, savePassword };
+}
+
+/**
+ * Resolve an explicit `--password` flag into credentials. Passwords are only
+ * ever collected through the hidden prompt, so the flag requires a TTY.
+ */
+async function promptPasswordFlag(
+  deps: SshCommandDeps,
+  label: string,
+): Promise<SshAuthOptions> {
+  if (!deps.isInteractive()) {
+    throw new Error(
+      '--password needs an interactive terminal — the password is entered via a hidden prompt and is never accepted as a command-line value',
+    );
+  }
+  return promptPasswordAuth(deps, label);
+}
+
+/**
+ * The needs-password branch of `test`/`connect`: interactively collect a
+ * password, or fail with an actionable message when there is no TTY.
+ */
+async function promptPasswordRetry(
+  deps: SshCommandDeps,
+  name: string,
+  command: 'connect' | 'test',
+  label: string,
+): Promise<SshAuthOptions> {
+  if (!deps.isInteractive()) {
+    throw new Error(formatNeedsPasswordError(name, command));
+  }
+  deps.stdout.write(
+    `ssh connection "${name}" requires a password — public key authentication failed.\n`,
+  );
+  return promptPasswordAuth(deps, label);
+}
+
 export interface SshAddOptions {
   name: string;
   target?: string;
   user?: string;
   port?: string;
   identityFile?: string;
+  /** Prompt (hidden echo) for a password used by the post-add auto-test. */
+  password?: boolean;
+  /** Persist the password entered via --password after a successful test. */
+  savePassword?: boolean;
 }
 
 export async function handleSshAdd(
   options: SshAddOptions,
   deps: SshCommandDeps = DEFAULT_SSH_DEPS,
 ): Promise<void> {
+  if (options.savePassword === true && options.password !== true) {
+    throw new Error(
+      '--save-password requires --password — the password is entered via a hidden prompt and is never accepted as a command-line value',
+    );
+  }
+  if (options.password === true && !deps.isInteractive()) {
+    throw new Error(
+      '--password needs an interactive terminal — the password is entered via a hidden prompt and is never accepted as a command-line value',
+    );
+  }
   const spec = await resolveAddSpec(options, deps);
   const { backend } = await resolveBackend(deps);
   const info = await backend.add(spec);
-  deps.stdout.write(
-    [
-      `Saved ssh connection "${info.name}" (${sshTarget(info)}).`,
-      '',
-      'Next steps:',
-      `  kimi ssh test ${info.name}     verify connectivity and the remote setup`,
-      `  kimi ssh connect ${info.name}  open the remote web UI`,
-      '',
-    ].join('\n'),
-  );
+  const auth =
+    options.password === true ? await promptPasswordAuth(deps, sshTarget(info)) : undefined;
+  const result = await runTest(backend, info.name, auth);
+  deps.stdout.write(formatAddResult(info, result, auth));
+}
+
+function formatAddResult(
+  info: SshConnectionInfo,
+  result: SshTestResult,
+  auth: SshAuthOptions | undefined,
+): string {
+  const lines = [
+    `Saved ssh connection "${info.name}" (${sshTarget(info)}).`,
+    '',
+    formatAddAuthLine({
+      name: info.name,
+      ok: result.ok,
+      needsPassword: result.needsPassword,
+      passwordUsed: auth?.password !== undefined,
+      passwordSaved: result.ok && auth?.savePassword === true,
+    }),
+  ];
+  if (result.ok) {
+    lines.push(
+      `  Remote platform:  ${result.platform ?? 'unknown'}`,
+      `  kimi binary:      ${result.kimiPath ?? 'not installed — it will be uploaded on first connect'}`,
+      `  Remote server:    ${result.serverRunning === true ? 'running' : 'not running — it will be started on first connect'}`,
+    );
+  } else {
+    if (result.error !== undefined) lines.push(`  ${result.error}`);
+    if (result.needsPassword !== true) lines.push(sshTestHint(result.error ?? ''));
+  }
+  lines.push('', 'Next steps:', `  kimi ssh connect ${info.name}  open the remote web UI`);
+  if (!result.ok) {
+    lines.push(`  kimi ssh test ${info.name}     re-run the connectivity check`);
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 async function resolveAddSpec(
@@ -194,12 +344,60 @@ export async function handleSshRemove(
   deps.stdout.write(`Removed ssh connection "${options.name}".\n`);
 }
 
-export async function handleSshTest(
-  options: SshNameOptions,
+export interface SshPasswdOptions {
+  name: string;
+  /** Clear the saved password instead of setting one. */
+  clear?: boolean;
+}
+
+export async function handleSshPasswd(
+  options: SshPasswdOptions,
   deps: SshCommandDeps = DEFAULT_SSH_DEPS,
 ): Promise<void> {
   const { backend } = await resolveBackend(deps);
-  const result = await backend.test(options.name);
+  if (options.clear === true) {
+    await backend.clearPassword(options.name);
+    deps.stdout.write(`Cleared the saved password for ssh connection "${options.name}".\n`);
+    return;
+  }
+  if (!deps.isInteractive()) {
+    throw new Error(
+      'setting a password needs an interactive terminal — the password is entered via a hidden prompt and is never accepted as a command-line value',
+    );
+  }
+  const label = await targetLabel(backend, options.name);
+  const password = await deps.promptSecret(`Password for ${label}: `);
+  if (password.length === 0) {
+    throw new Error('no password entered — nothing saved');
+  }
+  await backend.setPassword(options.name, password);
+  deps.stdout.write(
+    [
+      `Saved the password for ssh connection "${options.name}" in ${secretsFilePath(deps)} (mode 0600).`,
+      `Verify it with:  kimi ssh test ${options.name}`,
+      '',
+    ].join('\n'),
+  );
+}
+
+export interface SshTestOptions {
+  name: string;
+  /** Prompt (hidden echo) for a password before testing. */
+  password?: boolean;
+}
+
+export async function handleSshTest(
+  options: SshTestOptions,
+  deps: SshCommandDeps = DEFAULT_SSH_DEPS,
+): Promise<void> {
+  const { backend } = await resolveBackend(deps);
+  const label = await targetLabel(backend, options.name);
+  const preAuth = options.password === true ? await promptPasswordFlag(deps, label) : undefined;
+  let result = await runTest(backend, options.name, preAuth);
+  if (!result.ok && result.needsPassword === true && preAuth === undefined) {
+    const retry = await promptPasswordRetry(deps, options.name, 'test', label);
+    result = await runTest(backend, options.name, retry);
+  }
   deps.stdout.write(formatTestResult(options.name, result));
   if (!result.ok) {
     throw new Error(`ssh connection "${options.name}" test failed`);
@@ -211,7 +409,9 @@ function formatTestResult(name: string, result: SshTestResult): string {
     return [
       `ssh connection "${name}": FAILED`,
       `  ${result.error ?? 'unknown error'}`,
-      sshTestHint(result.error ?? ''),
+      result.needsPassword === true
+        ? `Hint: a password is required — save one with \`kimi ssh passwd ${name}\`, or re-run with \`kimi ssh test ${name} --password\`.`
+        : sshTestHint(result.error ?? ''),
       '',
     ].join('\n');
   }
@@ -227,7 +427,7 @@ function formatTestResult(name: string, result: SshTestResult): string {
 /** Pattern-based hint: `test` collapses error kinds into plain messages. */
 function sshTestHint(message: string): string {
   if (/permission denied|authentication failed|auth/i.test(message)) {
-    return 'Hint: authentication failed — check `ssh-add -l` for loaded keys, or re-add the connection with --identity-file.';
+    return 'Hint: authentication failed — check `ssh-add -l` for loaded keys, re-add the connection with --identity-file, or save a password with `kimi ssh passwd`.';
   }
   if (/could not resolve|no route|timed out|timeout|unreachable|refused/i.test(message)) {
     return 'Hint: the host is unreachable — check the host name and your network connection (VPN, firewall).';
@@ -239,6 +439,8 @@ export interface SshConnectOptions {
   name: string;
   direct?: boolean;
   open?: boolean;
+  /** Prompt (hidden echo) for a password before connecting. */
+  password?: boolean;
 }
 
 export async function handleSshConnect(
@@ -253,6 +455,33 @@ export async function handleSshConnect(
   await connectDirect(options, deps);
 }
 
+/**
+ * Connect with public-key auth first; on a needs-password failure prompt
+ * (hidden echo) and retry once with the entered password.
+ */
+async function connectWithAuth(
+  backend: SshBackend,
+  options: SshConnectOptions,
+  deps: SshCommandDeps,
+): Promise<{ localOrigin: string; remoteToken?: string }> {
+  const preAuth =
+    options.password === true
+      ? await promptPasswordFlag(deps, await targetLabel(backend, options.name))
+      : undefined;
+  try {
+    return await backend.connect(options.name, preAuth);
+  } catch (error) {
+    if (preAuth !== undefined || !errorNeedsPassword(error)) throw error;
+    const retry = await promptPasswordRetry(
+      deps,
+      options.name,
+      'connect',
+      await targetLabel(backend, options.name),
+    );
+    return backend.connect(options.name, retry);
+  }
+}
+
 /** Proxy mode: the local server holds the tunnel; this command prints and exits. */
 async function connectViaServer(
   options: SshConnectOptions,
@@ -261,7 +490,7 @@ async function connectViaServer(
 ): Promise<void> {
   const token = deps.resolveToken();
   const backend = restBackend(deps, server);
-  await backend.connect(options.name);
+  await connectWithAuth(backend, options, deps);
   const info = await findConnection(backend, options.name);
   const openOrigin = browserOpenOrigin(serverOrigin(server));
   const remoteUrl = buildSshProxyUrl(openOrigin, options.name, token);
@@ -280,7 +509,10 @@ async function connectViaServer(
 /** Direct mode: hold the tunnel in this process until Ctrl+C. */
 async function connectDirect(options: SshConnectOptions, deps: SshCommandDeps): Promise<void> {
   const manager = localManager(deps);
-  const handle = await manager.connect(options.name);
+  const handle = await connectWithAuth(manager, options, deps);
+  if (handle.remoteToken === undefined) {
+    throw new Error('ssh tunnel connected without a remote token');
+  }
   const info = await findConnection(manager, options.name);
   const remoteUrl = buildSshDirectUrl(handle.localOrigin, handle.remoteToken);
   deps.stdout.write(
@@ -315,6 +547,20 @@ function defaultPrompt(question: string): Promise<string> {
   });
 }
 
+function defaultPromptSecret(question: string): Promise<string> {
+  return readSecretLine({ input: process.stdin, output: process.stdout }, question);
+}
+
+async function defaultConfirm(question: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(`${question} [y/N] `);
+    return /^y(?:es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
 async function defaultHoldForeground(
   onShutdown: (reason: string) => Promise<void>,
 ): Promise<void> {
@@ -341,6 +587,8 @@ export const DEFAULT_SSH_DEPS: SshCommandDeps = {
   resolveToken: () => tryResolveServerToken(getDataDir()),
   openUrl: defaultOpenUrl,
   prompt: defaultPrompt,
+  promptSecret: defaultPromptSecret,
+  confirm: defaultConfirm,
   isInteractive: () => process.stdin.isTTY ?? false,
   holdForeground: defaultHoldForeground,
   stdout: process.stdout,
