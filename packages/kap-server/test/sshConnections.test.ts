@@ -1,0 +1,270 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { SshRemoteError } from '@moonshot-ai/ssh-remote';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { ErrorCode } from '../src/protocol/error-codes';
+import { type RunningServer, startServer } from '../src/start';
+import { authedFetch } from './helpers/auth';
+import { fakeSshConnectionManager, type FakeSshConnectionManager } from './helpers/fakeSshConnectionManager';
+import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
+
+interface Envelope<T> {
+  code: number;
+  msg: string;
+  data: T;
+  request_id: string;
+}
+
+interface SshConnectionWire {
+  name: string;
+  host: string;
+  user?: string;
+  port: number;
+  identity_file?: string;
+  status: {
+    state: 'off' | 'connecting' | 'on' | 'error';
+    local_origin?: string;
+    error?: string;
+  };
+}
+
+describe('server-v2 /api/v1/ssh/connections', () => {
+  let home: string | undefined;
+  let server: RunningServer | undefined;
+  let base: string;
+  let fake: FakeSshConnectionManager;
+
+  beforeAll(async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-'));
+    fake = fakeSshConnectionManager();
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      sshConnectionManager: fake,
+    });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(async () => {
+    if (server !== undefined) await server.close();
+    if (home !== undefined) await rm(home, { recursive: true, force: true });
+  });
+
+  async function postJson<T>(path: string, body?: unknown): Promise<Envelope<T>> {
+    const res = await authedFetch(server as RunningServer, base, path, {
+      method: 'POST',
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as Envelope<T>;
+  }
+
+  it('lists, adds, gets, and removes connections with snake_case wire fields', async () => {
+    const initial = await authedFetch(server as RunningServer, base, '/api/v1/ssh/connections');
+    const initialBody = (await initial.json()) as Envelope<{ connections: SshConnectionWire[] }>;
+    expect(initialBody.code).toBe(0);
+    expect(initialBody.data.connections).toEqual([]);
+
+    const added = await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'devbox',
+      host: '192.168.1.10',
+      user: 'dev',
+      port: 2222,
+      identity_file: '~/.ssh/id_ed25519',
+    });
+    expect(added.code).toBe(0);
+    expect(added.data).toMatchObject({
+      name: 'devbox',
+      host: '192.168.1.10',
+      user: 'dev',
+      port: 2222,
+      identity_file: '~/.ssh/id_ed25519',
+      status: { state: 'off' },
+    });
+
+    const fetched = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/devbox',
+    );
+    const fetchedBody = (await fetched.json()) as Envelope<SshConnectionWire>;
+    expect(fetchedBody.code).toBe(0);
+    expect(fetchedBody.data.host).toBe('192.168.1.10');
+
+    const missing = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/ghost',
+    );
+    const missingBody = (await missing.json()) as Envelope<null>;
+    expect(missingBody.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+
+    const removed = await authedFetch(server as RunningServer, base, '/api/v1/ssh/connections/devbox', {
+      method: 'DELETE',
+    });
+    const removedBody = (await removed.json()) as Envelope<{ name: string }>;
+    expect(removedBody.code).toBe(0);
+    expect(removedBody.data).toEqual({ name: 'devbox' });
+
+    const removedAgain = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/devbox',
+      { method: 'DELETE' },
+    );
+    const removedAgainBody = (await removedAgain.json()) as Envelope<null>;
+    expect(removedAgainBody.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+  });
+
+  it('rejects duplicate adds, invalid names, and invalid profiles', async () => {
+    const added = await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'dup',
+      host: 'example.com',
+    });
+    expect(added.code).toBe(0);
+    expect(added.data.port).toBe(22);
+
+    const duplicate = await postJson<null>('/api/v1/ssh/connections', {
+      name: 'dup',
+      host: 'example.com',
+    });
+    expect(duplicate.code).toBe(ErrorCode.SSH_CONNECTION_ALREADY_EXISTS);
+
+    const badName = await postJson<null>('/api/v1/ssh/connections', {
+      name: 'not a name',
+      host: 'example.com',
+    });
+    expect(badName.code).toBe(ErrorCode.VALIDATION_FAILED);
+
+    const leadingDashHost = await postJson<null>('/api/v1/ssh/connections', {
+      name: 'dashy',
+      host: '-oProxyCommand=evil',
+    });
+    expect(leadingDashHost.code).toBe(ErrorCode.VALIDATION_FAILED);
+  });
+
+  it('tests, connects, and disconnects connections', async () => {
+    await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'target',
+      host: 'example.com',
+    });
+
+    const tested = await postJson<{
+      ok: boolean;
+      platform?: string;
+      kimi_path?: string;
+      server_running?: boolean;
+    }>('/api/v1/ssh/connections/target/test');
+    expect(tested.code).toBe(0);
+    expect(tested.data).toMatchObject({
+      ok: true,
+      platform: 'linux-x64',
+      kimi_path: '/home/example/.kimi-code/bin/kimi',
+      server_running: true,
+    });
+
+    const connected = await postJson<{ name: string; state: string; local_origin: string }>(
+      '/api/v1/ssh/connections/target/connect',
+    );
+    expect(connected.code).toBe(0);
+    expect(connected.data).toMatchObject({ name: 'target', state: 'on' });
+    expect(connected.data.local_origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+
+    const statusAfter = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/target',
+    );
+    const statusBody = (await statusAfter.json()) as Envelope<SshConnectionWire>;
+    expect(statusBody.data.status.state).toBe('on');
+
+    const disconnected = await postJson<{ name: string; state: string }>(
+      '/api/v1/ssh/connections/target/disconnect',
+    );
+    expect(disconnected.code).toBe(0);
+    expect(disconnected.data).toEqual({ name: 'target', state: 'off' });
+
+    const testMissing = await postJson<null>('/api/v1/ssh/connections/ghost/test');
+    expect(testMissing.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+    const connectMissing = await postJson<null>('/api/v1/ssh/connections/ghost/connect');
+    expect(connectMissing.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+    const disconnectMissing = await postJson<null>('/api/v1/ssh/connections/ghost/disconnect');
+    expect(disconnectMissing.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+  });
+
+  it('maps unreachable remotes to SSH_UNREACHABLE on connect', async () => {
+    await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'down',
+      host: 'example.com',
+    });
+    fake.setConnectError('down', new SshRemoteError('network', 'connect timed out'));
+
+    const connected = await postJson<null>('/api/v1/ssh/connections/down/connect');
+    expect(connected.code).toBe(ErrorCode.SSH_UNREACHABLE);
+    expect(connected.msg).toContain('connect timed out');
+  });
+});
+
+describe('server-v2 /api/v1/ssh/connections write gate', () => {
+  let home: string | undefined;
+  let server: RunningServer | undefined;
+  let base: string;
+
+  beforeAll(async () => {
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-gate-'));
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '0.0.0.0',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      bindClass: 'lan',
+      insecureNoTls: true,
+      sshConnectionManager: fakeSshConnectionManager(),
+    });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(async () => {
+    if (server !== undefined) await server.close();
+    if (home !== undefined) await rm(home, { recursive: true, force: true });
+  });
+
+  it('keeps read routes and registry writes available on non-loopback binds', async () => {
+    const listed = await authedFetch(server as RunningServer, base, '/api/v1/ssh/connections');
+    expect(listed.status).toBe(200);
+
+    const added = await authedFetch(server as RunningServer, base, '/api/v1/ssh/connections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'lanbox', host: 'example.com' }),
+    });
+    expect(added.status).toBe(200);
+
+    const detail = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/lanbox',
+    );
+    expect(detail.status).toBe(200);
+  });
+
+  it('returns 404 for test/connect/disconnect on non-loopback binds', async () => {
+    for (const action of ['test', 'connect', 'disconnect']) {
+      const res = await authedFetch(
+        server as RunningServer,
+        base,
+        `/api/v1/ssh/connections/lanbox/${action}`,
+        { method: 'POST' },
+      );
+      expect(res.status).toBe(404);
+    }
+  });
+});

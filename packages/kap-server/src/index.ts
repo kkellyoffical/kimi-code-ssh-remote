@@ -1,5 +1,7 @@
 export { startServer } from './start';
 export type { ServerHostIdentity, ServerStartOptions, RunningServer } from './start';
+export type { SshConnectionManager } from '@moonshot-ai/ssh-remote';
+export type { SshConnectionsRouteOptions } from './routes/sshConnections';
 export { okEnvelope, errEnvelope } from './envelope';
 export type { Envelope } from './envelope';
 export { classify } from './security/bindClassify';

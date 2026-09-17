@@ -84,6 +84,10 @@ import { ModelCatalogRefreshScheduler } from './services/modelCatalog/modelCatal
 import { startConfigChangedPublisher } from './services/config/configChangedPublisher';
 import { createAuthFailureLimiter } from './middleware/rateLimit';
 import { createRemoteControlManager } from '@moonshot-ai/remote-control';
+import { createSshConnectionManager, type SshConnectionManager } from '@moonshot-ai/ssh-remote';
+import { registerSshProxyRoutes } from './routes/sshProxy';
+import { registerSshPageRoute } from './routes/sshPage';
+import { createSshWsBridge } from './transport/ws/ssh/sshWsBridge';
 
 import { createAuthTokenService, type IAuthTokenService } from './services/auth/authTokenService';
 import { createCredentialValidator } from './services/auth/credentials';
@@ -115,6 +119,7 @@ export interface ServerStartOptions {
   readonly insecureNoTls?: boolean;
   readonly allowRemoteShutdown?: boolean;
   readonly authTokenService?: IAuthTokenService;
+  readonly sshConnectionManager?: SshConnectionManager;
   readonly disableAuth?: boolean;
   readonly webTitle?: string;
   readonly rpcToken?: string;
@@ -208,6 +213,8 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
       },
     },
   });
+  const sshConnectionManager =
+    opts.sshConnectionManager ?? createSshConnectionManager({ homeDir });
   const { app: core } = bootstrap(
     {
       homeDir,
@@ -311,6 +318,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     }
     configChangedPublisher.close();
     await remoteControlManager.close();
+    await sshConnectionManager.close();
     await app.close();
     configWarningSubscription.dispose();
     pluginChangeSubscription.dispose();
@@ -423,6 +431,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
           { name: 'fs', description: 'Filesystem operations' },
           { name: 'files', description: 'File upload & download' },
           { name: 'remote-control', description: 'Remote Control tunnel' },
+          { name: 'ssh', description: 'SSH remote connections' },
         ],
       },
       transformObject: (documentObject) => {
@@ -462,8 +471,12 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
             ? 'Remote Control cannot be combined with --dangerous-bypass-auth.'
             : undefined,
     },
+    sshConnections: {
+      service: sshConnectionManager,
+      enableWrite: exposureClass === 'loopback',
+    },
     onShutdown: () => {
-      void close().catch((err: unknown) => logger.error({ err }, 'server close failed'));
+      void close().catch((error: unknown) => logger.error({ error }, 'server close failed'));
     },
     connectionRegistry,
     broadcaster,
@@ -491,6 +504,8 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     logger,
   });
 
+  const sshWsBridge = createSshWsBridge({ service: sshConnectionManager });
+
   const handleUpgrade = async (
     req: IncomingMessage,
     socket: Duplex,
@@ -500,8 +515,9 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     const isV1 = url === WS_PATH_V1 || url.startsWith(`${WS_PATH_V1}?`);
     const isV3 = url === WS_PATH_V3 || url.startsWith(`${WS_PATH_V3}?`);
     const isDebug = url === WS_DEBUG_PATH || url.startsWith(`${WS_DEBUG_PATH}?`);
+    const sshWsMatch = /^\/ssh\/([^/]+)\/api\/v(1|3)\/ws(?:\?|$)/.exec(url);
     const wss = isV1 ? wssV1 : isV3 ? wssV3 : isDebug ? wssDebug : undefined;
-    if (wss === undefined) {
+    if (wss === undefined && sshWsMatch === null) {
       socket.destroy();
       return;
     }
@@ -563,7 +579,19 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     }
 
     (socket as Socket).setNoDelay(true);
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    if (sshWsMatch !== null) {
+      await sshWsBridge.handleUpgrade(
+        req,
+        socket as Socket,
+        head,
+        sshWsMatch[1]!,
+        sshWsMatch[2] === '3' ? '3' : '1',
+      );
+      return;
+    }
+    if (wss !== undefined) {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    }
   };
   app.server.on('upgrade', (req, socket, head) => {
     void handleUpgrade(req, socket, head).catch((error: unknown) =>
@@ -590,6 +618,9 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     const openApiDocument = (app as unknown as { swagger(): unknown }).swagger();
     return reply.type('application/json').send(openApiDocument);
   });
+
+  registerSshPageRoute(app);
+  await registerSshProxyRoutes(app, { service: sshConnectionManager });
 
   if (opts.webAssetsDir !== undefined) {
     await registerWebAssetRoutes(app, opts.webAssetsDir);

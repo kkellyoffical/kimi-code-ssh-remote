@@ -34,6 +34,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "DELETE",
+      "/api/v1/ssh/connections/{name}",
+    ],
+    [
+      "DELETE",
       "/api/v1/workspaces/{workspace_id}",
     ],
     [
@@ -290,6 +294,14 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "GET",
+      "/api/v1/ssh/connections",
+    ],
+    [
+      "GET",
+      "/api/v1/ssh/connections/{name}",
+    ],
+    [
+      "GET",
       "/api/v1/tools",
     ],
     [
@@ -327,6 +339,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "GET",
       "/openapi.json",
+    ],
+    [
+      "GET",
+      "/ssh",
     ],
     [
       "PATCH",
@@ -495,6 +511,22 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "POST",
       "/api/v1/shutdown",
+    ],
+    [
+      "POST",
+      "/api/v1/ssh/connections",
+    ],
+    [
+      "POST",
+      "/api/v1/ssh/connections/{name}/connect",
+    ],
+    [
+      "POST",
+      "/api/v1/ssh/connections/{name}/disconnect",
+    ],
+    [
+      "POST",
+      "/api/v1/ssh/connections/{name}/test",
     ],
     [
       "POST",
