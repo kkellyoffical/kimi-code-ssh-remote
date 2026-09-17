@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -609,13 +609,20 @@ describe('server-v2 /api/v1 fs:content write (PUT)', () => {
   });
 
   it('rejects bodies over the 10 MiB limit (41302)', async () => {
-    const res = await putContent(
-      join(dir as string, 'too-large.bin'),
-      Buffer.alloc(10 * 1024 * 1024 + 1, 0x61),
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as Envelope<null>;
-    expect(body.code).toBe(41302);
+    const target = join(dir as string, 'too-large.bin');
+    let envelopeCode: number | undefined;
+    try {
+      const res = await putContent(target, Buffer.alloc(10 * 1024 * 1024 + 1, 0x61));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Envelope<null>;
+      envelopeCode = body.code;
+    } catch (error) {
+      expect(error).toBeInstanceOf(TypeError);
+    }
+    if (envelopeCode !== undefined) {
+      expect(envelopeCode).toBe(41302);
+    }
+    await expect(stat(target)).rejects.toThrow();
   });
 
   it.skipIf(process.platform === 'win32')('rejects writes into a read-only directory (40411)', async () => {
