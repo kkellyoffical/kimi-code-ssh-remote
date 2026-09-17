@@ -78,6 +78,17 @@ Web 支持的斜杠命令见上文 [常用斜杠命令](#常用斜杠命令)，�
 
 </div>
 
+## 通过 SSH 在远程机器上工作
+
+web UI 也可以驱动远程机器：CLI 维持一条到远端主机的 SSH 隧道，本地服务把浏览器的 API 请求通过隧道转发过去——会话数据留在远端机器上，而你继续使用同一个浏览器界面。
+
+1. 先保存一次连接：`kimi ssh add prod ubuntu@example.com`（需要时可加 `--port` 或 `--identity-file`）。
+2. 打开连接：`kimi ssh connect prod`。
+
+`connect` 会打印并自动打开远端 web UI 的 URL。该 URL 加载本地 web UI，并通过 `?kimi_origin=` 查询参数指向隧道端点（`http://127.0.0.1:<port>/ssh/prod`），因此所有 API 请求都经 SSH 隧道转发；远端服务的 token 由本地服务在进程内注入，不会进入浏览器。首次连接一台新远端时，会自动在远端安装 Kimi Code CLI 并启动其服务。
+
+在终端中管理已保存的连接：`kimi ssh list` 显示各连接及实时状态，`kimi ssh test prod` 检查连通性与远端环境，`kimi ssh remove prod` 删除连接。服务器还内置了管理页 `http://127.0.0.1:<port>/ssh`（追加启动横幅中的 `#token=...`），可在浏览器里添加、测试、连接和打开连接。没有运行中的本地服务时，可以用 `kimi ssh connect prod --direct` 由终端直接持有隧道，并打开远端自己的 web UI。完整命令说明见 [kimi ssh](../reference/kimi-command.md#kimi-ssh)。
+
 ## 安全注意
 
 - **建议设置并列凭证**：绑定局域网地址后，额外设置 `KIMI_CODE_PASSWORD` 环境变量，服务端会对鉴权失败自动限流。

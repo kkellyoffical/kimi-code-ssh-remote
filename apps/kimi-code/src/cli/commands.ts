@@ -11,6 +11,7 @@ import { registerInstallDesktopCommand } from './sub/install-desktop';
 import { registerLoginCommand } from './sub/login';
 import { registerProviderCommand } from './sub/provider';
 import { registerSessionCommand } from './sub/session';
+import { registerSshCommand } from './sub/ssh';
 import { registerVisCommand } from './sub/vis';
 import { registerWebCommand } from './sub/web';
 
@@ -125,6 +126,7 @@ export function createProgram(
   registerSessionCommand(program);
   registerAcpCommand(program);
   registerWebCommand(program);
+  registerSshCommand(program);
   registerLoginCommand(program);
   registerDoctorCommand(program);
   registerVisCommand(program);
