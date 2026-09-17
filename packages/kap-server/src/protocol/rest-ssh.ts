@@ -7,6 +7,7 @@ export const sshConnectionStatusSchema = z.object({
   state: sshConnectionStateSchema,
   local_origin: z.string().optional(),
   error: z.string().optional(),
+  needs_password: z.boolean().optional(),
 });
 export type SshConnectionStatusWire = z.infer<typeof sshConnectionStatusSchema>;
 
@@ -16,6 +17,7 @@ export const sshConnectionSchema = z.object({
   user: z.string().optional(),
   port: z.number().int(),
   identity_file: z.string().optional(),
+  has_password: z.boolean(),
   status: sshConnectionStatusSchema,
 });
 export type SshConnectionWire = z.infer<typeof sshConnectionSchema>;
@@ -36,8 +38,37 @@ export const addSshConnectionRequestSchema = z.object({
   user: z.string().min(1).optional(),
   port: z.number().int().min(1).max(65535).optional(),
   identity_file: z.string().min(1).optional(),
+  password: z.string().min(1).optional(),
+  save_password: z.boolean().optional(),
 });
 export type AddSshConnectionRequest = z.infer<typeof addSshConnectionRequestSchema>;
+
+export const sshConnectionAuthRequestSchema = z.object({
+  password: z.string().min(1).optional(),
+  save_password: z.boolean().optional(),
+});
+export type SshConnectionAuthRequest = z.infer<typeof sshConnectionAuthRequestSchema>;
+
+export const submitSshConnectionPasswordRequestSchema = z.object({
+  password: z.string().min(1),
+  save_password: z.boolean().optional(),
+});
+export type SubmitSshConnectionPasswordRequest = z.infer<
+  typeof submitSshConnectionPasswordRequestSchema
+>;
+
+export const setSshConnectionPasswordRequestSchema = z.object({
+  password: z.string().min(1),
+});
+export type SetSshConnectionPasswordRequest = z.infer<
+  typeof setSshConnectionPasswordRequestSchema
+>;
+
+export const sshConnectionPasswordStateSchema = z.object({
+  name: z.string(),
+  has_password: z.boolean(),
+});
+export type SshConnectionPasswordStateWire = z.infer<typeof sshConnectionPasswordStateSchema>;
 
 export const sshConnectionNameParamSchema = z.object({
   name: z.string().min(1),
@@ -50,6 +81,7 @@ export const sshConnectionTestResultSchema = z.object({
   kimi_path: z.string().optional(),
   server_running: z.boolean().optional(),
   error: z.string().optional(),
+  needs_password: z.boolean().optional(),
 });
 export type SshConnectionTestResultWire = z.infer<typeof sshConnectionTestResultSchema>;
 

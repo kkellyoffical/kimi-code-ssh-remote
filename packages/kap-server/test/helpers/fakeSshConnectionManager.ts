@@ -1,6 +1,7 @@
 import {
   SshRemoteError,
   sshConnectionProfileSchema,
+  type SshAuthOptions,
   type SshConnectionHandle,
   type SshConnectionInfo,
   type SshConnectionManager,
@@ -11,8 +12,11 @@ import {
 
 export interface FakeSshConnectionManager extends SshConnectionManager {
   readonly connectCalls: string[];
+  readonly connectOptions: (SshAuthOptions | undefined)[];
   setHandle(name: string, handle: SshConnectionHandle | undefined): void;
   setConnectError(name: string, error: Error | undefined): void;
+  setAuthRequired(name: string, required: boolean): void;
+  savedPassword(name: string): string | undefined;
 }
 
 export interface FakeSshConnectionManagerOptions {
@@ -31,6 +35,9 @@ interface FakeEntry {
   state: 'off' | 'on';
   handle?: SshConnectionHandle;
   connectError?: Error;
+  authRequired: boolean;
+  password?: string;
+  needsPassword: boolean;
 }
 
 export function fakeSshConnectionManager(
@@ -39,11 +46,18 @@ export function fakeSshConnectionManager(
   const entries = new Map<string, FakeEntry>();
   const passwords = new Map<string, string>();
   const connectCalls: string[] = [];
+  const connectOptions: (SshAuthOptions | undefined)[] = [];
 
   const statusOf = (name: string): SshConnectionStatus => {
     const entry = entries.get(name);
-    if (entry === undefined || entry.state === 'off') return { state: 'off' };
-    return { state: 'on', localOrigin: entry.handle?.localOrigin };
+    if (entry === undefined || entry.state === 'off') {
+      return { state: 'off', needsPassword: entry?.needsPassword === true ? true : undefined };
+    }
+    return {
+      state: 'on',
+      localOrigin: entry.handle?.localOrigin,
+      needsPassword: entry.needsPassword === true ? true : undefined,
+    };
   };
 
   const infoOf = (entry: FakeEntry): SshConnectionInfo => ({
@@ -52,6 +66,7 @@ export function fakeSshConnectionManager(
     user: entry.spec.user,
     port: entry.spec.port,
     identityFile: entry.spec.identityFile,
+    hasPassword: entry.password !== undefined,
     status: statusOf(entry.spec.name),
   });
 
@@ -63,8 +78,12 @@ export function fakeSshConnectionManager(
     return entry;
   };
 
+  const passwordFor = (entry: FakeEntry, options?: SshAuthOptions): string | undefined =>
+    options?.password ?? entry.password;
+
   return {
     connectCalls,
+    connectOptions,
     setHandle(name, handle) {
       const entry = requireEntry(name);
       entry.handle = handle;
@@ -72,6 +91,13 @@ export function fakeSshConnectionManager(
     setConnectError(name, error) {
       const entry = requireEntry(name);
       entry.connectError = error;
+    },
+    setAuthRequired(name, required) {
+      const entry = requireEntry(name);
+      entry.authRequired = required;
+    },
+    savedPassword(name) {
+      return entries.get(name)?.password;
     },
     async list() {
       return [...entries.values()].map(infoOf);
@@ -84,7 +110,12 @@ export function fakeSshConnectionManager(
       if (entries.has(parsed.data.name)) {
         throw new SshRemoteError('config', `ssh connection "${parsed.data.name}" already exists`);
       }
-      const entry: FakeEntry = { spec: parsed.data, state: 'off' };
+      const entry: FakeEntry = {
+        spec: parsed.data,
+        state: 'off',
+        authRequired: false,
+        needsPassword: false,
+      };
       entries.set(parsed.data.name, entry);
       return infoOf(entry);
     },
@@ -106,8 +137,23 @@ export function fakeSshConnectionManager(
       requireEntry(name);
       passwords.delete(name);
     },
-    async test(name: string): Promise<SshTestResult> {
+    async setPassword(name: string, password: string) {
       requireEntry(name);
+      if (password.length === 0) {
+        throw new SshRemoteError('config', 'password must not be empty');
+      }
+      const entry = requireEntry(name);
+      entry.password = password;
+    },
+    async clearPassword(name: string) {
+      const entry = requireEntry(name);
+      entry.password = undefined;
+    },
+    async test(name: string, options?: SshAuthOptions): Promise<SshTestResult> {
+      const entry = requireEntry(name);
+      if (entry.authRequired && passwordFor(entry, options) === undefined) {
+        return { ok: false, error: 'ssh authentication failed: permission denied', needsPassword: true };
+      }
       return (
         opts.testResult ?? {
           ok: true,
@@ -117,14 +163,23 @@ export function fakeSshConnectionManager(
         }
       );
     },
-    async connect(name: string): Promise<SshConnectionHandle> {
+    async connect(name: string, options?: SshAuthOptions): Promise<SshConnectionHandle> {
       connectCalls.push(name);
+      connectOptions.push(options);
       const entry = requireEntry(name);
       if (entry.connectError !== undefined) throw entry.connectError;
+      if (entry.authRequired && passwordFor(entry, options) === undefined) {
+        entry.needsPassword = true;
+        throw new SshRemoteError('auth', 'ssh authentication failed: permission denied');
+      }
       const handle = opts.handleFor?.(name) ??
         entry.handle ?? { localOrigin: 'http://127.0.0.1:9', remoteToken: 'fake-remote-token' };
       entry.state = 'on';
       entry.handle = handle;
+      entry.needsPassword = false;
+      if (options?.password !== undefined && options.savePassword === true) {
+        entry.password = options.password;
+      }
       return handle;
     },
     async disconnect(name: string) {
