@@ -74,6 +74,7 @@
         ./packages/oauth
         ./packages/pi-tui
         ./packages/remote-control
+        ./packages/ssh-remote
         ./packages/telemetry
         ./packages/transcript
         ./packages/tree-sitter-bash
@@ -99,6 +100,7 @@
         "@moonshot-ai/klient"
         "@moonshot-ai/pi-tui"
         "@moonshot-ai/remote-control"
+        "@moonshot-ai/ssh-remote"
         "@moonshot-ai/kimi-telemetry"
         "@moonshot-ai/transcript"
         "@moonshot-ai/tree-sitter-bash"
