@@ -1,5 +1,6 @@
 import type {
   ProcessRunner,
+  RunOptions,
   RunResult,
   SpawnOptions,
   SpawnedProcess,
@@ -7,6 +8,7 @@ import type {
 
 export interface RecordedRun {
   readonly argv: readonly string[];
+  readonly env?: Record<string, string>;
 }
 
 export class FakeSpawnedProcess implements SpawnedProcess {
@@ -44,8 +46,8 @@ export class FakeProcessRunner implements ProcessRunner {
     this.handlers.unshift({ match, respond });
   }
 
-  async run(argv: readonly string[]): Promise<RunResult> {
-    this.runs.push({ argv });
+  async run(argv: readonly string[], options?: RunOptions): Promise<RunResult> {
+    this.runs.push({ argv, env: options?.env });
     const joined = argv.join(' ');
     for (const handler of this.handlers) {
       if (handler.match.test(joined)) {
