@@ -8,7 +8,7 @@ import chalk from 'chalk';
 
 import { darkColors } from '#/tui/theme/colors';
 
-import { SshApiError } from './client';
+import { SSH_HOST_KEY_CHANGED_CODE, SshApiError } from './client';
 import type { HostKeyFingerprint, OffendingHostKey } from './host-key';
 
 const primary = (text: string): string => chalk.hex(darkColors.primary)(text);
@@ -266,6 +266,9 @@ export function formatAddAuthLine(result: {
  */
 export function sshErrorHint(error: unknown): string | undefined {
   if (error instanceof SshRemoteError) {
+    if (error.kind === 'host-key-changed') {
+      return 'The remote\'s host key changed. Compare it with `kimi ssh host-key <name>`, then remove the stale key with `kimi ssh host-key <name> --forget`.';
+    }
     if (error.kind === 'auth') {
       return 'Authentication failed. Check your keys with `ssh-add -l`, save the connection with an explicit key (`kimi ssh add <name> <[user@]host> --identity-file <path>`), or use a password (`kimi ssh passwd <name>`).';
     }
@@ -283,6 +286,9 @@ export function sshErrorHint(error: unknown): string | undefined {
     }
     if (error.code === 40930) {
       return 'A connection with this name already exists. Run `kimi ssh list` to see it, or `kimi ssh remove` it first.';
+    }
+    if (error.code === SSH_HOST_KEY_CHANGED_CODE) {
+      return 'The remote\'s host key changed. Compare it with `kimi ssh host-key <name>`, then remove the stale key with `kimi ssh host-key <name> --forget`.';
     }
     if (error.code === -1) {
       return 'The local server accepted no connection. If this keeps happening, stop it and run `kimi web` again.';

@@ -1362,6 +1362,15 @@ describe('sshErrorHint', () => {
     expect(sshErrorHint(new SshApiError(40421, 'not found'))).toContain('kimi ssh list');
   });
 
+  it('maps host-key-changed to the host-key command on both backends', () => {
+    expect(sshErrorHint(new SshApiError(SSH_HOST_KEY_CHANGED_CODE, 'changed'))).toContain(
+      'kimi ssh host-key <name> --forget',
+    );
+    expect(sshErrorHint(new SshRemoteError('host-key-changed', 'changed'))).toContain(
+      'kimi ssh host-key <name> --forget',
+    );
+  });
+
   it('returns undefined for unknown errors', () => {
     expect(sshErrorHint(new Error('boom'))).toBeUndefined();
   });
