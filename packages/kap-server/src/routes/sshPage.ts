@@ -170,6 +170,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   var passwordPrompts = {};
   var dismissedPrompts = {};
   var hostKeyPrompts = {};
+  var dismissedHostKey = {};
   var consoleSelect = document.getElementById('console-select');
   var consoleEmpty = document.getElementById('console-empty');
   var consoleSection = document.getElementById('console-section');
@@ -427,6 +428,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     cancel.textContent = 'Cancel';
     cancel.addEventListener('click', function () {
       delete hostKeyPrompts[conn.name];
+      dismissedHostKey[conn.name] = true;
       refresh(true);
     });
     var retry = document.createElement('button');
@@ -745,6 +747,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     emptyHint.classList.toggle('hidden', connections.length > 0);
     connections.forEach(function (conn) {
       if (!conn.status.needs_password) delete dismissedPrompts[conn.name];
+      if (!conn.status.host_key) delete dismissedHostKey[conn.name];
       var tr = document.createElement('tr');
       var nameTd = document.createElement('td');
       nameTd.textContent = conn.name;
@@ -818,11 +821,24 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
           });
         }));
       }
+      actions.appendChild(actionButton('Delete', function () {
+        if (!window.confirm('Delete connection ' + conn.name + '? This also removes any saved password for it.')) {
+          return Promise.resolve();
+        }
+        return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name), { method: 'DELETE' }).then(function () {
+          delete passwordPrompts[conn.name];
+          delete hostKeyPrompts[conn.name];
+          showMessage('deleted: ' + conn.name, 'ok');
+        });
+      }));
       actionsTd.appendChild(actions);
       tr.appendChild(actionsTd);
       rows.appendChild(tr);
       if (conn.status.needs_password && passwordPrompts[conn.name] === undefined && !dismissedPrompts[conn.name]) {
         passwordPrompts[conn.name] = { error: null, prefill: null };
+      }
+      if (conn.status.host_key && hostKeyPrompts[conn.name] === undefined && !dismissedHostKey[conn.name]) {
+        hostKeyPrompts[conn.name] = { details: conn.status.host_key, retry: 'connect' };
       }
       if (passwordPrompts[conn.name] !== undefined) {
         rows.appendChild(passwordPromptRow(conn, passwordPrompts[conn.name]));

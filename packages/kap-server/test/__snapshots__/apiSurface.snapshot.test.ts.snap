@@ -310,6 +310,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "GET",
+      "/api/v1/ssh/connections/{name}/host-key/forget",
+    ],
+    [
+      "GET",
       "/api/v1/tools",
     ],
     [
@@ -531,6 +535,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "POST",
       "/api/v1/ssh/connections/{name}/disconnect",
+    ],
+    [
+      "POST",
+      "/api/v1/ssh/connections/{name}/host-key/forget",
     ],
     [
       "POST",

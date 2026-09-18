@@ -3,11 +3,23 @@ import { z } from 'zod';
 export const sshConnectionStateSchema = z.enum(['off', 'connecting', 'on', 'error']);
 export type SshConnectionStateWire = z.infer<typeof sshConnectionStateSchema>;
 
+export const sshHostKeyDetailsSchema = z.object({
+  host: z.string(),
+  port: z.number().int(),
+  fingerprint: z.string().optional(),
+  key_type: z.string().optional(),
+  expected_fingerprint: z.string().optional(),
+  known_hosts_file: z.string().optional(),
+  known_hosts_line: z.number().int().optional(),
+});
+export type SshHostKeyDetailsWire = z.infer<typeof sshHostKeyDetailsSchema>;
+
 export const sshConnectionStatusSchema = z.object({
   state: sshConnectionStateSchema,
   local_origin: z.string().optional(),
   error: z.string().optional(),
   needs_password: z.boolean().optional(),
+  host_key: sshHostKeyDetailsSchema.optional(),
 });
 export type SshConnectionStatusWire = z.infer<typeof sshConnectionStatusSchema>;
 
@@ -104,7 +116,7 @@ export const deleteSshConnectionResponseSchema = z.object({
 export type DeleteSshConnectionResponse = z.infer<typeof deleteSshConnectionResponseSchema>;
 
 export const sshHostKeySchema = z.object({
-  type: z.string(),
+  key_type: z.string(),
   fingerprint: z.string(),
 });
 export type SshHostKeyWire = z.infer<typeof sshHostKeySchema>;
@@ -122,14 +134,3 @@ export const forgetSshHostKeyResponseSchema = z.object({
   forgotten: z.boolean(),
 });
 export type ForgetSshHostKeyResponse = z.infer<typeof forgetSshHostKeyResponseSchema>;
-
-export const sshHostKeyErrorDetailsSchema = z.object({
-  host: z.string(),
-  port: z.number().int(),
-  fingerprint: z.string(),
-  key_type: z.string().optional(),
-  expected_fingerprint: z.string().optional(),
-  known_hosts_file: z.string().optional(),
-  known_hosts_line: z.number().int().optional(),
-});
-export type SshHostKeyErrorDetailsWire = z.infer<typeof sshHostKeyErrorDetailsSchema>;

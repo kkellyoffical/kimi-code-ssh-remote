@@ -16,6 +16,7 @@ interface Envelope<T> {
   msg: string;
   data: T;
   request_id: string;
+  details?: unknown;
 }
 
 interface SshConnectionWire {
@@ -30,6 +31,15 @@ interface SshConnectionWire {
     local_origin?: string;
     error?: string;
     needs_password?: boolean;
+    host_key?: {
+      host: string;
+      port: number;
+      fingerprint?: string;
+      key_type?: string;
+      expected_fingerprint?: string;
+      known_hosts_file?: string;
+      known_hosts_line?: number;
+    };
   };
 }
 
@@ -271,6 +281,170 @@ describe('server-v2 /api/v1/ssh/connections', () => {
     expect(testedWithPassword.data.ok).toBe(true);
   });
 
+  it('maps host-key-changed failures to SSH_HOST_KEY_CHANGED with structured details', async () => {
+    await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'rotated',
+      host: 'example.com',
+    });
+    fake.setHostKeyChanged('rotated', {
+      host: 'example.com',
+      port: 22,
+      fingerprint: 'SHA256:new-presented-key',
+      keyType: 'ssh-ed25519',
+      expectedFingerprint: 'SHA256:old-trusted-key',
+      knownHostsFile: '/home/example/.ssh/known_hosts',
+      knownHostsLine: 12,
+    });
+
+    const connected = await postJson<null>('/api/v1/ssh/connections/rotated/connect');
+    expect(connected.code).toBe(ErrorCode.SSH_HOST_KEY_CHANGED);
+    expect(connected.code).toBe(40931);
+    expect(connected.msg).toContain('has changed');
+    expect(connected.details).toEqual({
+      host: 'example.com',
+      port: 22,
+      fingerprint: 'SHA256:new-presented-key',
+      key_type: 'ssh-ed25519',
+      expected_fingerprint: 'SHA256:old-trusted-key',
+      known_hosts_file: '/home/example/.ssh/known_hosts',
+      known_hosts_line: 12,
+    });
+
+    const tested = await postJson<null>('/api/v1/ssh/connections/rotated/test');
+    expect(tested.code).toBe(ErrorCode.SSH_HOST_KEY_CHANGED);
+    expect(tested.details).toMatchObject({
+      host: 'example.com',
+      fingerprint: 'SHA256:new-presented-key',
+    });
+
+    const detail = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/rotated',
+    );
+    const detailBody = (await detail.json()) as Envelope<SshConnectionWire>;
+    expect(detailBody.data.status.host_key).toMatchObject({
+      host: 'example.com',
+      fingerprint: 'SHA256:new-presented-key',
+      known_hosts_line: 12,
+    });
+  });
+
+  it('scans and forgets host keys via the host-key endpoints', async () => {
+    await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'scanned',
+      host: 'example.com',
+      port: 2222,
+    });
+
+    interface HostKeyScanWire {
+      name: string;
+      host: string;
+      port: number;
+      keys: { key_type: string; fingerprint: string }[];
+    }
+
+    const scanned = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/scanned/host-key/forget',
+    );
+    const scannedBody = (await scanned.json()) as Envelope<HostKeyScanWire>;
+    expect(scannedBody.code).toBe(0);
+    expect(scannedBody.data).toEqual({
+      name: 'scanned',
+      host: 'example.com',
+      port: 2222,
+      keys: [{ key_type: 'ssh-ed25519', fingerprint: 'SHA256:fake-scanned-host-key' }],
+    });
+
+    fake.setHostKeyScan('scanned', {
+      host: 'example.com',
+      port: 2222,
+      keys: [
+        { keyType: 'ssh-ed25519', fingerprint: 'SHA256:ed25519-key' },
+        { keyType: 'ecdsa-sha2-nistp256', fingerprint: 'SHA256:ecdsa-key' },
+      ],
+    });
+    const rescanned = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/scanned/host-key/forget',
+    );
+    const rescannedBody = (await rescanned.json()) as Envelope<HostKeyScanWire>;
+    expect(rescannedBody.data.keys).toHaveLength(2);
+
+    const forgotten = await postJson<{ name: string; forgotten: boolean }>(
+      '/api/v1/ssh/connections/scanned/host-key/forget',
+    );
+    expect(forgotten.code).toBe(0);
+    expect(forgotten.data).toEqual({ name: 'scanned', forgotten: true });
+    expect(fake.forgottenHostKeys).toContain('scanned');
+
+    const missingScan = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/ghost/host-key/forget',
+    );
+    const missingScanBody = (await missingScan.json()) as Envelope<null>;
+    expect(missingScanBody.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+
+    const missingForget = await postJson<null>('/api/v1/ssh/connections/ghost/host-key/forget');
+    expect(missingForget.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+  });
+
+  it('recovers from host-key-changed after forgetting the old key', async () => {
+    await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'recover',
+      host: 'example.com',
+    });
+    fake.setHostKeyChanged('recover', {
+      host: 'example.com',
+      port: 22,
+      fingerprint: 'SHA256:new-presented-key',
+    });
+
+    const blocked = await postJson<null>('/api/v1/ssh/connections/recover/connect');
+    expect(blocked.code).toBe(ErrorCode.SSH_HOST_KEY_CHANGED);
+    expect(blocked.details).toEqual({
+      host: 'example.com',
+      port: 22,
+      fingerprint: 'SHA256:new-presented-key',
+    });
+
+    const forgotten = await postJson<{ name: string; forgotten: boolean }>(
+      '/api/v1/ssh/connections/recover/host-key/forget',
+    );
+    expect(forgotten.code).toBe(0);
+
+    const retried = await postJson<{ name: string; state: string }>(
+      '/api/v1/ssh/connections/recover/connect',
+    );
+    expect(retried.code).toBe(0);
+    expect(retried.data.state).toBe('on');
+  });
+
+  it('serves the management page with host-key-changed warning affordances', async () => {
+    const res = await authedFetch(server as RunningServer, base, '/ssh');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('40931');
+    expect(body).toContain('host key changed');
+    expect(body).toContain('man-in-the-middle attack');
+    expect(body).toContain('Remove old key and retry');
+    expect(body).toContain('/host-key/forget');
+    expect(body).toContain('host-key-row');
+    expect(body).toContain('New key fingerprint:');
+  });
+
+  it('serves the management page with a delete-connection action', async () => {
+    const res = await authedFetch(server as RunningServer, base, '/ssh');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('Delete');
+    expect(body).toContain('also removes any saved password');
+  });
+
   it('never echoes passwords and persists them only with save_password', async () => {
     const rejected = await postJson<null>('/api/v1/ssh/connections', {
       name: 'nopersist',
@@ -469,6 +643,23 @@ describe('server-v2 /api/v1/ssh/connections write gate', () => {
       );
       expect(res.status).toBe(404);
     }
+  });
+
+  it('returns 404 for host-key scan and forget on non-loopback binds', async () => {
+    const scanned = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/lanbox/host-key/forget',
+    );
+    expect(scanned.status).toBe(404);
+
+    const forgotten = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/lanbox/host-key/forget',
+      { method: 'POST' },
+    );
+    expect(forgotten.status).toBe(404);
   });
 
   it('keeps password store and clear available on non-loopback binds', async () => {

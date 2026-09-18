@@ -23,14 +23,14 @@ import {
   sshConnectionPasswordStateSchema,
   sshConnectionSchema,
   sshConnectionTestResultSchema,
-  sshHostKeyErrorDetailsSchema,
+  sshHostKeyDetailsSchema,
   sshHostKeyScanResponseSchema,
   submitSshConnectionPasswordRequestSchema,
   type ConnectSshConnectionResponse,
   type DisconnectSshConnectionResponse,
   type SshConnectionTestResultWire,
   type SshConnectionWire,
-  type SshHostKeyErrorDetailsWire,
+  type SshHostKeyDetailsWire,
   type SshHostKeyScanResponse,
 } from '../protocol/rest-ssh';
 
@@ -77,13 +77,13 @@ export interface SshConnectionsRouteOptions {
 interface MappedSshError {
   readonly code: ErrorCode;
   readonly msg: string;
-  readonly details?: SshHostKeyErrorDetailsWire;
+  readonly details?: SshHostKeyDetailsWire;
 }
 
 interface SshHostKeyDetails {
   readonly host: string;
   readonly port: number;
-  readonly fingerprint: string;
+  readonly fingerprint?: string;
   readonly keyType?: string;
   readonly expectedFingerprint?: string;
   readonly knownHostsFile?: string;
@@ -93,7 +93,7 @@ interface SshHostKeyDetails {
 interface SshHostKeyScanResult {
   readonly host: string;
   readonly port: number;
-  readonly keys: readonly { readonly type: string; readonly fingerprint: string }[];
+  readonly keys: readonly { readonly keyType: string; readonly fingerprint: string }[];
 }
 
 interface SshHostKeyCapableManager {
@@ -347,7 +347,7 @@ export function registerSshConnectionsRoutes(
         [ErrorCode.VALIDATION_FAILED]: {},
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
         [ErrorCode.SSH_AUTH_REQUIRED]: {},
-        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyErrorDetailsSchema },
+        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyDetailsSchema },
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Probe an SSH connection: handshake plus remote kap-server detection',
@@ -395,7 +395,7 @@ export function registerSshConnectionsRoutes(
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
         [ErrorCode.SSH_AUTH_REQUIRED]: {},
         [ErrorCode.SSH_UNREACHABLE]: {},
-        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyErrorDetailsSchema },
+        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyDetailsSchema },
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Establish the SSH tunnel for a connection (idempotent)',
@@ -435,7 +435,7 @@ export function registerSshConnectionsRoutes(
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
         [ErrorCode.SSH_AUTH_REQUIRED]: {},
         [ErrorCode.SSH_UNREACHABLE]: {},
-        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyErrorDetailsSchema },
+        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyDetailsSchema },
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Submit an SSH password and connect, persisting it when save_password is true',
@@ -540,7 +540,7 @@ export function registerSshConnectionsRoutes(
           name,
           host: scan.host,
           port: scan.port,
-          keys: scan.keys.map((key) => ({ type: key.type, fingerprint: key.fingerprint })),
+          keys: scan.keys.map((key) => ({ key_type: key.keyType, fingerprint: key.fingerprint })),
         };
         reply.send(okEnvelope(response, req.id));
       } catch (error) {
@@ -612,6 +612,7 @@ function authOptionsOf(body: unknown): SshAuthOptions | undefined {
 }
 
 function toWire(info: SshConnectionInfo): SshConnectionWire {
+  const hostKey = statusHostKeyOf(info.status);
   return {
     name: info.name,
     host: info.host,
@@ -624,6 +625,7 @@ function toWire(info: SshConnectionInfo): SshConnectionWire {
       local_origin: info.status.localOrigin,
       error: info.status.error,
       needs_password: info.status.needsPassword,
+      host_key: hostKey === undefined ? undefined : toHostKeyDetailsWire(hostKey),
     },
   };
 }
@@ -664,7 +666,11 @@ function testHostKeyOf(result: SshTestResult): SshHostKeyDetails | undefined {
   return (result as SshTestResult & { hostKey?: SshHostKeyDetails }).hostKey;
 }
 
-function toHostKeyDetailsWire(details: SshHostKeyDetails): SshHostKeyErrorDetailsWire {
+function statusHostKeyOf(status: SshConnectionInfo['status']): SshHostKeyDetails | undefined {
+  return (status as SshConnectionInfo['status'] & { hostKey?: SshHostKeyDetails }).hostKey;
+}
+
+function toHostKeyDetailsWire(details: SshHostKeyDetails): SshHostKeyDetailsWire {
   return {
     host: details.host,
     port: details.port,

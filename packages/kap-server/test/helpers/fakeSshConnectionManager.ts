@@ -14,7 +14,7 @@ import {
 export interface FakeHostKeyDetails {
   readonly host: string;
   readonly port: number;
-  readonly fingerprint: string;
+  readonly fingerprint?: string;
   readonly keyType?: string;
   readonly expectedFingerprint?: string;
   readonly knownHostsFile?: string;
@@ -24,7 +24,7 @@ export interface FakeHostKeyDetails {
 export interface FakeHostKeyScan {
   readonly host: string;
   readonly port: number;
-  readonly keys: readonly { readonly type: string; readonly fingerprint: string }[];
+  readonly keys: readonly { readonly keyType: string; readonly fingerprint: string }[];
 }
 
 export interface FakeSshConnectionManager extends SshConnectionManager {
@@ -77,7 +77,7 @@ function defaultHostKeyScan(entry: FakeEntry): FakeHostKeyScan {
   return {
     host: entry.spec.host,
     port: entry.spec.port,
-    keys: [{ type: 'ssh-ed25519', fingerprint: 'SHA256:fake-scanned-host-key' }],
+    keys: [{ keyType: 'ssh-ed25519', fingerprint: 'SHA256:fake-scanned-host-key' }],
   };
 }
 
@@ -92,7 +92,11 @@ export function fakeSshConnectionManager(
   const statusOf = (name: string): SshConnectionStatus => {
     const entry = entries.get(name);
     if (entry === undefined || entry.state === 'off') {
-      return { state: 'off', needsPassword: entry?.needsPassword === true ? true : undefined };
+      return {
+        state: 'off',
+        needsPassword: entry?.needsPassword === true ? true : undefined,
+        hostKey: entry?.hostKeyChanged,
+      } as SshConnectionStatus;
     }
     return {
       state: 'on',
