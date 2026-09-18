@@ -7,6 +7,11 @@ import {
   type RemotePlatform,
 } from './bootstrap';
 import { SshRemoteError, errorMessage, isNeedsPasswordError } from './errors';
+import {
+  forgetRemoteHostKey,
+  scanRemoteHostKey,
+  type ScannedHostKey,
+} from './hostkeys';
 import { resolveKimiHome, type SshConnectionProfile, type SshConnectionProfileInput } from './profile';
 import { createSystemProcessRunner, type ProcessRunner } from './runner';
 import { SecretsStore } from './secrets';
@@ -36,6 +41,7 @@ export interface SshConnectionInfo {
   readonly user?: string;
   readonly port: number;
   readonly identityFile?: string;
+  readonly strictHostKeyChecking?: boolean;
   readonly hasPassword?: boolean;
   readonly status: SshConnectionStatus;
 }
@@ -60,6 +66,8 @@ export interface SshConnectionManager {
   remove(name: string): Promise<void>;
   setPassword(name: string, password: string): Promise<void>;
   clearPassword(name: string): Promise<void>;
+  scanHostKey(name: string): Promise<ScannedHostKey[]>;
+  forgetHostKey(name: string): Promise<void>;
   test(name: string, options?: SshAuthOptions): Promise<SshTestResult>;
   connect(name: string, options?: SshAuthOptions): Promise<SshConnectionHandle>;
   disconnect(name: string): Promise<void>;
@@ -256,6 +264,7 @@ export function createSshConnectionManager(
           user: profile.user,
           port: profile.port,
           identityFile: profile.identityFile,
+          strictHostKeyChecking: profile.strictHostKeyChecking,
           hasPassword: await secrets.hasPassword(profile.name),
           status: statusOf(profile.name),
         })),
@@ -269,6 +278,7 @@ export function createSshConnectionManager(
         user: profile.user,
         port: profile.port,
         identityFile: profile.identityFile,
+        strictHostKeyChecking: profile.strictHostKeyChecking,
         hasPassword: false,
         status: statusOf(profile.name),
       };
@@ -287,6 +297,14 @@ export function createSshConnectionManager(
     },
     async clearPassword(name) {
       await secrets.removePassword(name);
+    },
+    async scanHostKey(name) {
+      const profile = await requireProfile(name);
+      return scanRemoteHostKey(profile, runner);
+    },
+    async forgetHostKey(name) {
+      const profile = await requireProfile(name);
+      await forgetRemoteHostKey(profile, runner);
     },
     async test(name, testOptions) {
       const auth = normalizeAuth(testOptions);

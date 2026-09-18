@@ -4,6 +4,7 @@ export * from './store';
 export * from './secrets';
 export * from './runner';
 export * from './ssh';
+export * from './hostkeys';
 export * from './bootstrap';
 export * from './tunnel';
 export * from './session';
