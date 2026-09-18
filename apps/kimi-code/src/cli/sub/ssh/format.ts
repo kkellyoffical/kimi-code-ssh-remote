@@ -176,18 +176,18 @@ export function formatHostKeyChangedWarning(options: {
   name: string;
   target: string;
   presented?: HostKeyFingerprint;
-  stored?: HostKeyFingerprint;
+  storedFingerprint?: string;
   offending?: OffendingHostKey;
 }): string {
   const lines = [
     `${bad('WARNING:')} the host key for ${strong(options.name)} ${dim(`(${options.target})`)} has changed!`,
   ];
-  if (options.stored !== undefined) {
+  if (options.storedFingerprint !== undefined) {
     const where =
       options.offending === undefined
-        ? options.stored.keyType
-        : `${options.stored.keyType}, ${options.offending.file}:${options.offending.line}`;
-    lines.push(`  Stored fingerprint:     ${options.stored.fingerprint}  ${dim(`(${where})`)}`);
+        ? ''
+        : `  ${dim(`(${options.offending.file}:${options.offending.line})`)}`;
+    lines.push(`  Stored fingerprint:     ${options.storedFingerprint}${where}`);
   } else if (options.offending !== undefined) {
     lines.push(`  Stored key:             ${options.offending.file}:${options.offending.line}`);
   }

@@ -26,7 +26,6 @@
  * touch a real server, registry, or ssh binary.
  */
 
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
@@ -73,12 +72,12 @@ import {
 } from './format';
 import {
   extractHostKeyChangedDetails,
+  hostKeyChangedFromTestResult,
   isHostKeyChangedError,
   knownHostsRemoveTarget,
   primaryScannedKey,
-  storedHostKeyFingerprint,
+  type HostKeyChangedDetails,
   type HostKeyFingerprint,
-  type OffendingHostKey,
 } from './host-key';
 import { readSecretLine } from './secret-prompt';
 
@@ -99,11 +98,6 @@ export interface SshCommandDeps {
   /** Yes/no question; resolves true only for an explicit yes. */
   confirm: (question: string) => Promise<boolean>;
   isInteractive: () => boolean;
-  /**
-   * Read a known_hosts file to recover the stored fingerprint for the
-   * host-key-changed warning; best-effort, failures degrade the display.
-   */
-  readTextFile?: (path: string) => Promise<string>;
   /** Blocks until SIGINT/SIGTERM, then runs the shutdown callback. */
   holdForeground: (onShutdown: (reason: string) => Promise<void>) => Promise<void>;
   stdout: Pick<NodeJS.WriteStream, 'write'>;
@@ -255,8 +249,37 @@ async function withHostKeyRetry<T>(
     return await attempt();
   } catch (error) {
     if (!isHostKeyChangedError(error)) throw error;
-    await resolveHostKeyChanged(deps, backend, name, label, error);
+    await resolveHostKeyChanged(deps, backend, name, label, extractHostKeyChangedDetails(error));
     return attempt();
+  }
+}
+
+/**
+ * The `test` counterpart of `withHostKeyRetry`: the local manager folds a
+ * host-key-changed failure into the result (`{ ok: false, hostKey }`) instead
+ * of throwing, and the REST backend may answer either way, so both the result
+ * and the throw path resolve here, with a single retry either way.
+ */
+async function runTestResolvingHostKey(
+  deps: SshCommandDeps,
+  backend: SshBackend,
+  name: string,
+  label: string,
+  auth: SshAuthOptions | undefined,
+): Promise<SshTestResult> {
+  let retried = false;
+  for (;;) {
+    try {
+      const result = await runTest(backend, name, auth);
+      const details = hostKeyChangedFromTestResult(result);
+      if (details === undefined || retried) return result;
+      retried = true;
+      await resolveHostKeyChanged(deps, backend, name, label, details);
+    } catch (error) {
+      if (!isHostKeyChangedError(error) || retried) throw error;
+      retried = true;
+      await resolveHostKeyChanged(deps, backend, name, label, extractHostKeyChangedDetails(error));
+    }
   }
 }
 
@@ -265,19 +288,14 @@ async function resolveHostKeyChanged(
   backend: SshBackend,
   name: string,
   label: string,
-  error: unknown,
+  details: HostKeyChangedDetails,
 ): Promise<void> {
-  const details = extractHostKeyChangedDetails(error);
   const presented = details.presented ?? (await scanPresentedKey(backend, name));
-  const stored =
-    details.offending === undefined
-      ? undefined
-      : await readStoredFingerprint(deps, details.offending);
   const warning = formatHostKeyChangedWarning({
     name,
     target: label,
     presented,
-    stored,
+    storedFingerprint: details.storedFingerprint,
     offending: details.offending,
   });
   if (!deps.isInteractive()) {
@@ -292,25 +310,13 @@ async function resolveHostKeyChanged(
   deps.stdout.write(`Removed the stored host key for "${name}" — retrying.\n`);
 }
 
-/** The presented fingerprint for the warning when the error carried none. */
+/** The presented fingerprint for the warning when the failure carried none. */
 async function scanPresentedKey(
   backend: SshBackend,
   name: string,
 ): Promise<HostKeyFingerprint | undefined> {
   try {
     return primaryScannedKey(await backend.scanHostKey(name));
-  } catch {
-    return undefined;
-  }
-}
-
-async function readStoredFingerprint(
-  deps: SshCommandDeps,
-  offending: OffendingHostKey,
-): Promise<HostKeyFingerprint | undefined> {
-  const read = deps.readTextFile ?? ((path: string) => readFile(path, 'utf8'));
-  try {
-    return storedHostKeyFingerprint(await read(offending.file), offending.line);
   } catch {
     return undefined;
   }
@@ -521,13 +527,13 @@ export async function handleSshHostKey(
     deps.stdout.write(`${formatHostKeyForgotten(options.name, label)}\n`);
     return;
   }
-  const keys = await backend.scanHostKey(options.name);
-  if (keys.length === 0) {
+  const scan = await backend.scanHostKey(options.name);
+  if (scan.keys.length === 0) {
     throw new Error(
       `no host key found for ssh connection "${options.name}" — the host did not answer the scan`,
     );
   }
-  deps.stdout.write(`${formatScannedHostKeys(options.name, label, keys)}\n`);
+  deps.stdout.write(`${formatScannedHostKeys(options.name, label, scan.keys)}\n`);
 }
 
 export interface SshTestOptions {
@@ -543,14 +549,10 @@ export async function handleSshTest(
   const { backend } = await resolveBackend(deps);
   const label = await targetLabel(backend, options.name);
   const preAuth = options.password === true ? await promptPasswordFlag(deps, label) : undefined;
-  let result = await withHostKeyRetry(deps, backend, options.name, label, () =>
-    runTest(backend, options.name, preAuth),
-  );
+  let result = await runTestResolvingHostKey(deps, backend, options.name, label, preAuth);
   if (!result.ok && result.needsPassword === true && preAuth === undefined) {
     const retry = await promptPasswordRetry(deps, options.name, 'test', label);
-    result = await withHostKeyRetry(deps, backend, options.name, label, () =>
-      runTest(backend, options.name, retry),
-    );
+    result = await runTestResolvingHostKey(deps, backend, options.name, label, retry);
   }
   deps.stdout.write(formatTestResult(options.name, result));
   if (!result.ok) {

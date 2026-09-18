@@ -1,19 +1,18 @@
 /**
  * Host-key helpers for `kimi ssh`: detecting the host-key-changed failure
- * across the local manager and the REST backend, and recovering the two
- * fingerprints the user must compare — the stored one (from the offending
- * known_hosts line) and the presented one (from the ssh stderr, or a fresh
- * `ssh-keyscan` when the stderr is unavailable).
+ * across the local manager and the REST backend, and normalizing the two
+ * fingerprints the user must compare — the stored one (already recovered
+ * from the offending known_hosts line by the backend) and the one the
+ * remote presents now.
  */
-
-import { createHash } from 'node:crypto';
 
 import { SshRemoteError } from '@moonshot-ai/ssh-remote';
 
 import {
   SSH_HOST_KEY_CHANGED_CODE,
   SshApiError,
-  type SshScannedHostKey,
+  type SshHostKeyDetailsShape,
+  type SshHostKeyScan,
 } from './client';
 
 /** One host key reduced to what the user compares: algorithm + fingerprint. */
@@ -30,6 +29,7 @@ export interface OffendingHostKey {
 
 export interface HostKeyChangedDetails {
   presented?: HostKeyFingerprint;
+  storedFingerprint?: string;
   offending?: OffendingHostKey;
 }
 
@@ -42,80 +42,68 @@ export function isHostKeyChangedError(error: unknown): boolean {
   );
 }
 
+/** Wire shape of the 40931 envelope `details` (all fields best-effort). */
+interface HostKeyChangedWireDetails {
+  fingerprint?: string;
+  key_type?: string;
+  expected_fingerprint?: string;
+  known_hosts_file?: string;
+  known_hosts_line?: number;
+}
+
 /**
- * Pull the presented fingerprint and the offending known_hosts location out
- * of a host-key-changed failure. Local errors carry the ssh stderr (parsed
- * here) and the offending location; REST errors carry whatever the server
- * parsed into the envelope data. Missing pieces are left undefined — callers
- * degrade or re-scan instead of failing.
+ * Pull the comparison data out of a thrown host-key-changed failure. Local
+ * errors carry `hostKey`; REST errors carry the envelope `details`. Missing
+ * pieces stay undefined — callers degrade or re-scan instead of failing.
  */
 export function extractHostKeyChangedDetails(error: unknown): HostKeyChangedDetails {
   if (error instanceof SshApiError) {
-    const data = error.data as
-      | {
-          host_key?: { key_type?: string; fingerprint?: string };
-          offending?: { file?: string; line?: number };
-        }
-      | undefined;
-    const presented =
-      typeof data?.host_key?.fingerprint === 'string'
-        ? { keyType: data.host_key.key_type ?? 'unknown', fingerprint: data.host_key.fingerprint }
-        : undefined;
-    const offending =
-      typeof data?.offending?.file === 'string' && typeof data.offending.line === 'number'
-        ? { file: data.offending.file, line: data.offending.line }
-        : undefined;
-    return { presented, offending };
+    const details = error.details as HostKeyChangedWireDetails | undefined;
+    return {
+      presented:
+        typeof details?.fingerprint === 'string'
+          ? { keyType: details.key_type ?? 'unknown', fingerprint: details.fingerprint }
+          : undefined,
+      storedFingerprint:
+        typeof details?.expected_fingerprint === 'string'
+          ? details.expected_fingerprint
+          : undefined,
+      offending: offendingLocation(details?.known_hosts_file, details?.known_hosts_line),
+    };
   }
   if (error instanceof SshRemoteError) {
-    const offending = (
-      error as SshRemoteError & { offendingHostKey?: OffendingHostKey }
-    ).offendingHostKey;
-    return {
-      presented: parsePresentedHostKey(error.stderr ?? ''),
-      offending,
-    };
+    const hostKey = (error as SshRemoteError & { hostKey?: SshHostKeyDetailsShape }).hostKey;
+    return hostKey === undefined ? {} : detailsFromHostKey(hostKey);
   }
   return {};
 }
 
 /**
- * The fingerprint ssh itself prints on a changed-key refusal:
- * `The fingerprint for the ED25519 key sent by the remote host is SHA256:….`
+ * The local manager's `test()` folds failures into the result instead of
+ * throwing, so the host-key-changed case arrives as `{ ok: false, hostKey }`.
+ * Returns undefined for every other failure kind.
  */
-export function parsePresentedHostKey(stderr: string): HostKeyFingerprint | undefined {
-  const match =
-    /The fingerprint for the (\S+) key sent by the remote host is\s*(SHA256:[A-Za-z0-9+/=]+)/.exec(
-      stderr,
-    );
-  if (match === null) return undefined;
-  return { keyType: match[1] ?? 'unknown', fingerprint: match[2] ?? '' };
+export function hostKeyChangedFromTestResult(result: {
+  ok: boolean;
+  hostKey?: SshHostKeyDetailsShape;
+}): HostKeyChangedDetails | undefined {
+  if (result.ok || result.hostKey === undefined) return undefined;
+  return detailsFromHostKey(result.hostKey);
 }
 
-/**
- * Recompute the stored fingerprint from a known_hosts file: the offending
- * line holds the base64 key blob, whose SHA256 (base64, padding stripped) is
- * exactly the `SHA256:…` fingerprint `ssh-keygen -l` prints. Best-effort —
- * returns undefined for unreadable or malformed lines.
- */
-export function storedHostKeyFingerprint(
-  knownHostsContent: string,
-  line: number,
-): HostKeyFingerprint | undefined {
-  const row = knownHostsContent.split('\n')[line - 1]?.trim();
-  if (row === undefined || row.length === 0 || row.startsWith('#')) return undefined;
-  const fields = row.split(/\s+/);
-  const blobIndex = fields.findIndex((field) => field.startsWith('AAAA'));
-  if (blobIndex < 1) return undefined;
-  try {
-    const digest = createHash('sha256')
-      .update(Buffer.from(fields[blobIndex] ?? '', 'base64'))
-      .digest('base64')
-      .replace(/=+$/, '');
-    return { keyType: fields[blobIndex - 1] ?? 'unknown', fingerprint: `SHA256:${digest}` };
-  } catch {
-    return undefined;
-  }
+function detailsFromHostKey(hostKey: SshHostKeyDetailsShape): HostKeyChangedDetails {
+  return {
+    presented:
+      hostKey.fingerprint === undefined
+        ? undefined
+        : { keyType: hostKey.keyType ?? 'unknown', fingerprint: hostKey.fingerprint },
+    storedFingerprint: hostKey.expectedFingerprint,
+    offending: offendingLocation(hostKey.knownHostsFile, hostKey.knownHostsLine),
+  };
+}
+
+function offendingLocation(file: unknown, line: unknown): OffendingHostKey | undefined {
+  return typeof file === 'string' && typeof line === 'number' ? { file, line } : undefined;
 }
 
 /** The target `ssh-keygen -R` expects: bare host on port 22, `[host]:port` otherwise. */
@@ -124,10 +112,8 @@ export function knownHostsRemoveTarget(host: string, port: number): string {
 }
 
 /** Pick the key a warning should show when a scan returned several. */
-export function primaryScannedKey(
-  keys: readonly SshScannedHostKey[],
-): HostKeyFingerprint | undefined {
-  const first = keys[0];
+export function primaryScannedKey(scan: SshHostKeyScan): HostKeyFingerprint | undefined {
+  const first = scan.keys[0];
   return first === undefined
     ? undefined
     : { keyType: first.keyType, fingerprint: first.fingerprint };

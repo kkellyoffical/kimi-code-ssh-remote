@@ -23,15 +23,34 @@ export const SSH_AUTH_REQUIRED_CODE = 40130;
 export const SSH_HOST_KEY_CHANGED_CODE = 40931;
 
 /**
- * A host key reported by `ssh-keyscan` on the remote. Structurally identical
- * to `ScannedHostKey` from `@moonshot-ai/ssh-remote`; declared here so the
- * CLI compiles against the manager both before and after that type lands.
+ * A host key reported by `ssh-keyscan` on the remote, and the scan result
+ * wrapping it. Structurally identical to `ScannedHostKey`/`SshHostKeyScan`
+ * from `@moonshot-ai/ssh-remote`; declared here so the CLI compiles against
+ * the manager both before and after those types land.
  */
 export interface SshScannedHostKey {
-  host: string;
   keyType: string;
   /** SHA256 fingerprint in the `SHA256:…` form `ssh-keygen -l` prints. */
   fingerprint: string;
+}
+
+export interface SshHostKeyScan {
+  host: string;
+  port: number;
+  keys: SshScannedHostKey[];
+}
+
+/**
+ * Mirror of the manager's `SshHostKeyDetails` (host-key contract): the
+ * comparison data attached to a host-key-changed failure — the presented
+ * fingerprint, the stored one, and the offending known_hosts location.
+ */
+export interface SshHostKeyDetailsShape {
+  fingerprint?: string;
+  keyType?: string;
+  expectedFingerprint?: string;
+  knownHostsFile?: string;
+  knownHostsLine?: number;
 }
 
 /**
@@ -47,7 +66,7 @@ export interface SshBackend {
   connect(name: string, auth?: SshAuthOptions): Promise<{ localOrigin: string; remoteToken?: string }>;
   setPassword(name: string, password: string): Promise<void>;
   clearPassword(name: string): Promise<void>;
-  scanHostKey(name: string): Promise<SshScannedHostKey[]>;
+  scanHostKey(name: string): Promise<SshHostKeyScan>;
   forgetHostKey(name: string): Promise<void>;
 }
 
@@ -56,8 +75,8 @@ export class SshApiError extends Error {
   constructor(
     readonly code: number,
     message: string,
-    /** Error-envelope `data` payload, when the server attaches details. */
-    readonly data?: unknown,
+    /** Error-envelope `details` payload, when the server attaches them. */
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = 'SshApiError';
@@ -84,6 +103,7 @@ interface WireEnvelope<T> {
   code: number;
   msg: string;
   data: T | null;
+  details?: unknown;
 }
 
 function fromWire(wire: WireConnection): SshConnectionInfo {
@@ -151,7 +171,7 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
       throw new SshApiError(
         envelope.code,
         envelope.msg || `request failed (HTTP ${response.status})`,
-        envelope.data ?? undefined,
+        envelope.details,
       );
     }
     return envelope.data;
@@ -181,14 +201,16 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
         `/${encodeURIComponent(name)}/test`,
         authBody(auth),
       );
-      return {
+      const result: SshTestResult & { hostKey?: SshHostKeyDetailsShape } = {
         ok: data.ok,
         platform: data.platform as RemotePlatform | undefined,
         kimiPath: data.kimi_path,
         serverRunning: data.server_running,
         error: data.error,
         needsPassword: data.needs_password,
+        hostKey: fromWireHostKeyDetails(data.host_key),
       };
+      return result;
     },
     async connect(name, auth) {
       const data = await call<{ local_origin: string }>(
@@ -207,15 +229,15 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
       await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}/password`);
     },
     async scanHostKey(name) {
-      const data = await call<{ keys: WireScannedHostKey[] }>(
+      const data = await call<WireHostKeyScan>(
         'GET',
         `/${encodeURIComponent(name)}/host-key`,
       );
-      return data.keys.map((key) => ({
-        host: key.host,
-        keyType: key.key_type,
-        fingerprint: key.fingerprint,
-      }));
+      return {
+        host: data.host,
+        port: data.port,
+        keys: data.keys.map((key) => ({ keyType: key.type, fingerprint: key.fingerprint })),
+      };
     },
     async forgetHostKey(name) {
       await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}/host-key`);
@@ -230,10 +252,32 @@ interface SshTestWire {
   server_running?: boolean;
   error?: string;
   needs_password?: boolean;
+  host_key?: WireHostKeyDetails;
 }
 
-interface WireScannedHostKey {
+interface WireHostKeyDetails {
+  fingerprint?: string;
+  key_type?: string;
+  expected_fingerprint?: string;
+  known_hosts_file?: string;
+  known_hosts_line?: number;
+}
+
+function fromWireHostKeyDetails(
+  wire: WireHostKeyDetails | undefined,
+): SshHostKeyDetailsShape | undefined {
+  if (wire === undefined) return undefined;
+  return {
+    fingerprint: wire.fingerprint,
+    keyType: wire.key_type,
+    expectedFingerprint: wire.expected_fingerprint,
+    knownHostsFile: wire.known_hosts_file,
+    knownHostsLine: wire.known_hosts_line,
+  };
+}
+
+interface WireHostKeyScan {
   host: string;
-  key_type: string;
-  fingerprint: string;
+  port: number;
+  keys: { type: string; fingerprint: string }[];
 }
