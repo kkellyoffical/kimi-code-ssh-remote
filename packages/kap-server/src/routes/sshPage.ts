@@ -18,141 +18,183 @@ const SSH_PAGE_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SSH Connections - Kimi Code</title>
+<title>SSH 连接 - Kimi Code</title>
 <style>
-:root { color-scheme: light dark; }
+:root {
+  color-scheme: dark;
+  --bg: #121212;
+  --card: #1a1a1a;
+  --inset: #161616;
+  --border: #2e2e2e;
+  --row-border: #262626;
+  --fg: #ededed;
+  --muted: #999999;
+  --faint: #666666;
+  --hover: rgba(255, 255, 255, 0.04);
+  --primary-bg: #ededed;
+  --primary-fg: #161616;
+  --success: hsl(152, 48%, 55%);
+  --warning: hsl(32, 65%, 58%);
+  --danger: hsl(0, 60%, 50%);
+  --danger-fg: hsl(0, 70%, 68%);
+  --info: hsl(215, 55%, 62%);
+}
 * { box-sizing: border-box; }
-body { margin: 0; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; line-height: 1.5; background: Canvas; color: CanvasText; }
+body { margin: 0; padding: 32px 24px 48px; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.6; }
 main { max-width: 960px; margin: 0 auto; }
-h1 { font-size: 18px; margin: 0 0 16px; }
-h2 { font-size: 15px; margin: 24px 0 8px; }
-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); vertical-align: middle; }
-th { font-weight: 600; font-size: 12px; opacity: 0.7; }
-form.add { margin-top: 8px; }
-form.add .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; align-items: end; }
-label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; opacity: 0.85; }
-label.radio, label.checkbox { flex-direction: row; align-items: center; gap: 6px; }
-input, select { padding: 6px 8px; font: inherit; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 6px; background: Canvas; color: CanvasText; }
-input[type="radio"], input[type="checkbox"] { padding: 0; }
-button { padding: 6px 12px; font: inherit; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 6px; background: color-mix(in srgb, CanvasText 6%, transparent); color: CanvasText; cursor: pointer; }
-button:hover { background: color-mix(in srgb, CanvasText 12%, transparent); }
-button:disabled { opacity: 0.5; cursor: default; }
-button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-button.primary:hover { background: #1d4ed8; }
-button.link { border: none; background: none; padding: 0; color: #2563eb; text-align: left; }
-button.link:hover { background: none; text-decoration: underline; }
-fieldset.auth-method { margin: 12px 0 0; padding: 0; border: none; display: flex; gap: 16px; flex-wrap: wrap; }
-fieldset.auth-method legend { font-size: 12px; opacity: 0.7; padding: 0; margin-bottom: 4px; }
-.auth-panel { margin-top: 8px; max-width: 420px; }
-.auth-panel .risk { margin: 4px 0 0; font-size: 12px; }
-form.add button[type="submit"] { margin-top: 12px; }
-.state { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
-.state-on { background: #dcfce7; color: #166534; }
-.state-off { background: color-mix(in srgb, CanvasText 10%, transparent); }
-.state-connecting { background: #fef9c3; color: #854d0e; }
-.state-error { background: #fee2e2; color: #991b1b; }
-.state-needs-password { background: #ffedd5; color: #9a3412; }
-.state-host-key { background: #fef3c7; color: #92400e; }
-.msg { margin: 8px 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; }
-.msg-error { background: #fee2e2; color: #991b1b; }
-.msg-ok { background: #dcfce7; color: #166534; }
-.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.page-head h1 { font-size: 20px; font-weight: 600; margin: 0; }
+.page-head p { margin: 4px 0 0; }
+.muted { color: var(--muted); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .hidden { display: none; }
-.muted { opacity: 0.6; }
-tr.password-row td { padding: 8px 10px; background: color-mix(in srgb, CanvasText 4%, transparent); }
-tr.host-key-row td { padding: 8px 10px; background: color-mix(in srgb, CanvasText 4%, transparent); }
-.host-key-box p { margin: 2px 0; }
-.host-key-box .host-key-title { margin: 0 0 4px; font-weight: 600; color: #991b1b; }
-.host-key-box .row-actions { margin-top: 8px; }
-form.password-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
-form.password-form label { min-width: 200px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px 20px; margin-top: 16px; }
+.card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.card h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 20px 0 0; }
+#message { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; padding: 10px 14px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; }
+#message.hidden { display: none; }
+#message.msg-error { background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger-fg); }
+#message.msg-ok { background: color-mix(in srgb, var(--success) 14%, transparent); border-color: color-mix(in srgb, var(--success) 35%, transparent); color: var(--success); }
+#message-text { flex: 1; white-space: pre-wrap; }
+#message-close { border: none; background: none; padding: 0 2px; color: inherit; opacity: 0.7; cursor: pointer; font-size: 14px; line-height: 1.4; }
+#message-close:hover { background: none; opacity: 1; }
+table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+th { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 500; color: var(--muted); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--row-border); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--hover); }
+tr.password-row td, tr.host-key-row td { background: var(--inset); padding: 12px 10px; }
+tbody tr.password-row:hover td, tbody tr.host-key-row:hover td { background: var(--inset); }
+form#token-form { display: flex; gap: 10px; align-items: flex-end; margin-top: 12px; }
+form#token-form label { flex: 1; max-width: 360px; }
+form.add .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 12px; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+label.radio, label.checkbox { flex-direction: row; align-items: center; gap: 6px; color: var(--fg); font-size: 13px; }
+input, select { padding: 6px 10px; font: inherit; font-size: 13px; color: var(--fg); background: var(--inset); border: 1px solid var(--border); border-radius: 6px; }
+input:focus, select:focus { outline: none; border-color: #4d4d4d; }
+input::placeholder { color: var(--faint); }
+input[type="radio"], input[type="checkbox"] { padding: 0; accent-color: var(--primary-bg); }
+fieldset.auth-method { margin: 14px 0 0; padding: 0; border: none; display: flex; gap: 16px; flex-wrap: wrap; }
+fieldset.auth-method legend { font-size: 12px; color: var(--muted); padding: 0; margin-bottom: 6px; }
+.auth-panel { margin-top: 10px; max-width: 420px; }
+.auth-panel .risk { margin: 6px 0 0; font-size: 12px; }
+form.add button[type="submit"] { margin-top: 14px; }
+button { padding: 5px 12px; font: inherit; font-size: 13px; color: var(--fg); background: transparent; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+button:hover { background: var(--hover); }
+button:disabled { opacity: 0.5; cursor: default; }
+button:disabled:hover { background: transparent; }
+button.primary { background: var(--primary-bg); border-color: var(--primary-bg); color: var(--primary-fg); font-weight: 500; }
+button.primary:hover { background: #ffffff; }
+button.primary:disabled:hover { background: var(--primary-bg); }
+button.danger { color: var(--danger-fg); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+button.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
+button.link { border: none; background: none; padding: 0; color: var(--info); text-align: left; }
+button.link:hover { background: none; text-decoration: underline; }
+.state { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 12px; line-height: 18px; white-space: nowrap; }
+.state-on { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.state-off { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+.state-connecting { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
+.state-error { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger-fg); }
+.state-needs-password { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
+.state-host-key { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger-fg); }
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+form.password-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+form.password-form label { min-width: 220px; }
 form.password-form .risk { flex-basis: 100%; margin: 0; font-size: 12px; }
-form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; color: #991b1b; white-space: pre-wrap; }
-.console-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 24px; }
+form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--danger-fg); white-space: pre-wrap; }
+.host-key-box { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.host-key-box p { margin: 2px 0; }
+.host-key-box .host-key-title { margin: 0 0 4px; font-weight: 600; color: var(--danger-fg); }
+.host-key-box .row-actions { margin-top: 10px; }
+.console-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .console-head h2 { margin: 0; }
-.console-head select { min-width: 200px; }
-.console-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
-.path-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
-.console-error { margin: 8px 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; background: #fee2e2; color: #991b1b; white-space: pre-wrap; }
-.size-cell, .mtime-cell { white-space: nowrap; font-size: 12px; opacity: 0.75; }
+.console-head select { min-width: 220px; }
+.console-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.path-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); background: var(--inset); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; word-break: break-all; }
+.inline-error { margin: 10px 0 0; padding: 8px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger-fg); font-size: 13px; white-space: pre-wrap; }
+.size-cell, .mtime-cell { white-space: nowrap; font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
 <main>
-<h1>SSH Connections</h1>
-<section id="token-section" class="hidden">
-<h2>Access token</h2>
-<p class="muted">Paste the local server token (shown in the server startup banner). It is kept in this page's URL fragment only.</p>
+<header class="page-head">
+<h1>SSH 连接</h1>
+<p class="muted">注册并管理远程机器，连接后可浏览远程文件与项目。</p>
+</header>
+<section id="token-section" class="card hidden">
+<h2>访问令牌</h2>
+<p class="muted">粘贴本地服务器启动横幅中显示的访问令牌。令牌仅保存在本页 URL 的 fragment 中。</p>
 <form id="token-form">
-<label>Token <input id="token-input" type="password" autocomplete="off" required></label>
-<button type="submit" class="primary">Save</button>
+<label>令牌 <input id="token-input" type="password" autocomplete="off" required></label>
+<button type="submit" class="primary">保存</button>
 </form>
 </section>
 <section id="main-section" class="hidden">
-<div id="message"></div>
-<h2>Add connection</h2>
+<div id="message" class="hidden"><span id="message-text"></span><button type="button" id="message-close" aria-label="关闭">×</button></div>
+<section class="card">
+<h2>添加连接</h2>
 <form class="add" id="add-form">
 <div class="grid">
-<label>Name <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="my-server"></label>
-<label>Host <input name="host" required placeholder="192.168.1.10"></label>
-<label>User <input name="user" placeholder="root"></label>
-<label>Port <input name="port" type="number" min="1" max="65535" placeholder="22"></label>
+<label>名称 <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="my-server"></label>
+<label>主机 <input name="host" required placeholder="192.168.1.10"></label>
+<label>用户 <input name="user" placeholder="root"></label>
+<label>端口 <input name="port" type="number" min="1" max="65535" placeholder="22"></label>
 </div>
 <fieldset class="auth-method" id="auth-method">
-<legend>Authentication</legend>
-<label class="radio"><input type="radio" name="auth_method" value="default" checked> Agent / default keys (password-less)</label>
-<label class="radio"><input type="radio" name="auth_method" value="identity"> Identity file</label>
-<label class="radio"><input type="radio" name="auth_method" value="password"> Password</label>
+<legend>认证方式</legend>
+<label class="radio"><input type="radio" name="auth_method" value="default" checked> Agent / 默认密钥（免密）</label>
+<label class="radio"><input type="radio" name="auth_method" value="identity"> Identity 文件</label>
+<label class="radio"><input type="radio" name="auth_method" value="password"> 密码</label>
 </fieldset>
 <div class="auth-panel hidden" id="auth-identity-panel">
-<label>Identity file <input name="identity_file" placeholder="~/.ssh/id_ed25519"></label>
+<label>Identity 文件 <input name="identity_file" placeholder="~/.ssh/id_ed25519"></label>
 </div>
 <div class="auth-panel hidden" id="auth-password-panel">
-<label>Password <input name="password" type="password" autocomplete="new-password"></label>
-<label class="checkbox"><input name="save_password" type="checkbox"> Remember password</label>
-<p class="muted risk">Saved passwords are stored in clear text in ~/.kimi-code/ssh/secrets.json on this machine. If not saved, you will be asked for the password when connecting.</p>
+<label>密码 <input name="password" type="password" autocomplete="new-password"></label>
+<label class="checkbox"><input name="save_password" type="checkbox"> 记住密码</label>
+<p class="muted risk">保存的密码将以明文存放在本机 ~/.kimi-code/ssh/secrets.json 中。若不保存，连接时会要求输入密码。</p>
 </div>
-<button type="submit" class="primary">Add</button>
+<button type="submit" class="primary">添加</button>
 </form>
-<h2>Connections</h2>
+</section>
+<section class="card">
+<h2>连接列表</h2>
 <table>
-<thead><tr><th>Name</th><th>Target</th><th>Auth</th><th>State</th><th>Detail</th><th>Actions</th></tr></thead>
+<thead><tr><th>名称</th><th>目标</th><th>认证</th><th>状态</th><th>详情</th><th>操作</th></tr></thead>
 <tbody id="rows"></tbody>
 </table>
-<p class="muted" id="empty-hint">No connections yet.</p>
+<p class="muted" id="empty-hint">暂无连接，先在上方添加一台远程机器。</p>
+</section>
+<section class="card">
 <div class="console-head">
 <h2>Remote console</h2>
 <select id="console-select" class="mono"></select>
 </div>
-<section id="console-empty">
-<p class="muted">Add a connection to browse remote files and projects.</p>
-</section>
-<section id="console-section" class="hidden">
-<h2>Files</h2>
+<p class="muted" id="console-empty">添加连接后即可浏览远程文件与项目。</p>
+<div id="console-section" class="hidden">
+<h3>文件</h3>
 <div class="console-bar">
-<button type="button" id="files-up">Up</button>
-<button type="button" id="files-refresh">Refresh</button>
-<button type="button" id="files-mkdir">New folder</button>
-<button type="button" id="files-upload">Upload</button>
+<button type="button" id="files-up">上级</button>
+<button type="button" id="files-refresh">刷新</button>
+<button type="button" id="files-mkdir">新建文件夹</button>
+<button type="button" id="files-upload">上传</button>
 <input type="file" id="files-upload-input" class="hidden">
 <span class="path-text" id="files-path"></span>
 </div>
-<div id="files-error" class="console-error hidden"></div>
+<div id="files-error" class="inline-error hidden"></div>
 <table>
-<thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
+<thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
 <tbody id="files-rows"></tbody>
 </table>
-<h2>Projects</h2>
+<h3>项目</h3>
 <div class="console-bar">
-<button type="button" id="projects-refresh">Refresh</button>
+<button type="button" id="projects-refresh">刷新</button>
 </div>
-<div id="projects-error" class="console-error hidden"></div>
+<div id="projects-error" class="inline-error hidden"></div>
 <table>
-<thead><tr><th>Name</th><th>Root</th><th>Sessions</th><th>Actions</th></tr></thead>
+<thead><tr><th>名称</th><th>根目录</th><th>会话数</th><th>操作</th></tr></thead>
 <tbody id="projects-rows"></tbody>
 </table>
+</div>
 </section>
 </section>
 </main>
@@ -164,6 +206,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   var tokenSection = document.getElementById('token-section');
   var mainSection = document.getElementById('main-section');
   var messageBox = document.getElementById('message');
+  var messageText = document.getElementById('message-text');
   var rows = document.getElementById('rows');
   var emptyHint = document.getElementById('empty-hint');
   var pollTimer = null;
@@ -201,10 +244,17 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     location.reload();
   });
 
+  document.getElementById('message-close').addEventListener('click', function () {
+    messageBox.className = 'hidden';
+  });
+
   function showMessage(text, kind) {
-    messageBox.textContent = text;
-    messageBox.className = 'msg ' + (kind === 'ok' ? 'msg-ok' : 'msg-error');
-    if (text === '') messageBox.className = 'hidden';
+    if (text === '') {
+      messageBox.className = 'hidden';
+      return;
+    }
+    messageText.textContent = text;
+    messageBox.className = kind === 'ok' ? 'msg-ok' : 'msg-error';
   }
 
   function rawApi(path, options) {
@@ -213,9 +263,9 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     if (options && options.rawBody !== undefined) {
       headers['content-type'] = 'application/octet-stream';
       body = options.rawBody;
-    } else {
+    } else if (options && options.body !== undefined) {
       headers['content-type'] = 'application/json';
-      body = options && options.body !== undefined ? JSON.stringify(options.body) : undefined;
+      body = JSON.stringify(options.body);
     }
     return fetch(path, {
       method: (options && options.method) || 'GET',
@@ -249,9 +299,9 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
 
   function authText(conn) {
     var parts = [];
-    if (conn.identity_file) parts.push('key: ' + conn.identity_file);
-    if (conn.has_password) parts.push('password (saved)');
-    if (parts.length === 0) return 'agent / default keys';
+    if (conn.identity_file) parts.push('密钥 ' + conn.identity_file);
+    if (conn.has_password) parts.push('密码（已保存）');
+    if (parts.length === 0) return 'agent / 默认密钥';
     return parts.join(' + ');
   }
 
@@ -259,6 +309,13 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     if (conn.status.state === 'on' && conn.status.local_origin) return conn.status.local_origin;
     if (conn.status.state === 'error' && conn.status.error) return conn.status.error;
     return '';
+  }
+
+  function stateText(state) {
+    if (state === 'on') return '已连接';
+    if (state === 'connecting') return '连接中';
+    if (state === 'error') return '错误';
+    return '未连接';
   }
 
   function anyPromptOpen() {
@@ -290,7 +347,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       body: { password: password, save_password: remember.checked }
     }).then(function () {
       delete passwordPrompts[conn.name];
-      showMessage('connected: ' + conn.name, 'ok');
+      showMessage('已连接：' + conn.name, 'ok');
       refresh(true);
     }).catch(function (error) {
       for (var i = 0; i < buttons.length; i++) buttons[i].disabled = false;
@@ -302,7 +359,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         return;
       }
       if (error.code === SSH_AUTH_REQUIRED) {
-        errorLine.textContent = 'authentication failed, please check the password and try again';
+        errorLine.textContent = '认证失败，请检查密码后重试';
       } else {
         errorLine.textContent = error.message;
       }
@@ -317,7 +374,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     var form = document.createElement('form');
     form.className = 'password-form';
     var label = document.createElement('label');
-    label.textContent = 'Password for ' + targetText(conn);
+    label.textContent = '输入 ' + targetText(conn) + ' 的密码';
     var input = document.createElement('input');
     input.type = 'password';
     input.className = 'password-input';
@@ -332,7 +389,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     remember.type = 'checkbox';
     remember.className = 'save-password-input';
     rememberLabel.appendChild(remember);
-    rememberLabel.appendChild(document.createTextNode('Remember password'));
+    rememberLabel.appendChild(document.createTextNode('记住密码'));
     form.appendChild(rememberLabel);
     var submit = document.createElement('button');
     submit.type = 'submit';
@@ -341,14 +398,14 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     form.appendChild(submit);
     var cancel = document.createElement('button');
     cancel.type = 'button';
-    cancel.textContent = 'Cancel';
+    cancel.textContent = '取消';
     cancel.addEventListener('click', function () {
       closePasswordPrompt(conn.name);
     });
     form.appendChild(cancel);
     var risk = document.createElement('p');
     risk.className = 'muted risk';
-    risk.textContent = 'Saved passwords are stored in clear text in ~/.kimi-code/ssh/secrets.json on this machine.';
+    risk.textContent = '保存的密码将以明文存放在本机 ~/.kimi-code/ssh/secrets.json 中。';
     form.appendChild(risk);
     var errorLine = document.createElement('p');
     errorLine.className = 'form-error';
@@ -375,7 +432,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       method: 'POST'
     }).then(function () {
       delete hostKeyPrompts[name];
-      showMessage('old host key removed for ' + name + ', retrying', 'ok');
+      showMessage(name + ' 的旧主机密钥已移除，正在重试', 'ok');
       var conn = null;
       for (var i = 0; i < knownConnections.length; i++) {
         if (knownConnections[i].name === name) conn = knownConnections[i];
@@ -394,30 +451,30 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     box.className = 'host-key-box';
     var title = document.createElement('p');
     title.className = 'host-key-title';
-    title.textContent = 'Warning: the host key for ' + targetText(conn) + ' has changed';
+    title.textContent = '警告：' + targetText(conn) + ' 的主机密钥已变更';
     box.appendChild(title);
     var explain = document.createElement('p');
     explain.className = 'muted';
-    explain.textContent = 'The server may have been reinstalled or its host key rotated, but this could also be a man-in-the-middle attack. Verify the new fingerprint with the server administrator before trusting it.';
+    explain.textContent = '服务器可能重装过系统或轮换了主机密钥，但也可能是中间人攻击（man-in-the-middle attack）。信任新密钥前，请与服务器管理员核实指纹。';
     box.appendChild(explain);
     var details = prompt.details;
     if (details !== null) {
       if (details.fingerprint) {
         var presented = document.createElement('p');
         presented.className = 'mono';
-        presented.textContent = 'New key fingerprint: ' + details.fingerprint + (details.key_type ? ' (' + details.key_type + ')' : '');
+        presented.textContent = '新密钥指纹：' + details.fingerprint + (details.key_type ? '（' + details.key_type + '）' : '');
         box.appendChild(presented);
       }
       if (details.expected_fingerprint) {
         var expected = document.createElement('p');
         expected.className = 'mono';
-        expected.textContent = 'Previously trusted fingerprint: ' + details.expected_fingerprint;
+        expected.textContent = '此前信任的指纹：' + details.expected_fingerprint;
         box.appendChild(expected);
       }
       if (details.known_hosts_file) {
         var knownHosts = document.createElement('p');
         knownHosts.className = 'mono muted';
-        knownHosts.textContent = 'Stored in ' + details.known_hosts_file + (details.known_hosts_line ? ' (line ' + details.known_hosts_line + ')' : '');
+        knownHosts.textContent = '保存于 ' + details.known_hosts_file + (details.known_hosts_line ? '（第 ' + details.known_hosts_line + ' 行）' : '');
         box.appendChild(knownHosts);
       }
     }
@@ -425,7 +482,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     buttons.className = 'row-actions';
     var cancel = document.createElement('button');
     cancel.type = 'button';
-    cancel.textContent = 'Cancel';
+    cancel.textContent = '取消';
     cancel.addEventListener('click', function () {
       delete hostKeyPrompts[conn.name];
       dismissedHostKey[conn.name] = true;
@@ -434,7 +491,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     var retry = document.createElement('button');
     retry.type = 'button';
     retry.className = 'primary';
-    retry.textContent = 'Remove old key and retry';
+    retry.textContent = '移除旧密钥并重试';
     retry.addEventListener('click', function () {
       retry.disabled = true;
       cancel.disabled = true;
@@ -453,12 +510,12 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   }
 
   function testConnection(conn) {
-    return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/test', { method: 'POST', body: {} }).then(function (result) {
+    return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/test', { method: 'POST' }).then(function (result) {
       if (!result.ok && result.needs_password) {
-        openPasswordPrompt(conn.name, result.error || 'password required');
+        openPasswordPrompt(conn.name, result.error || '需要密码');
         return;
       }
-      showMessage(result.ok ? ('test ok: ' + (result.platform || 'unknown platform') + (result.server_running ? ', server running' : '')) : ('test failed: ' + (result.error || 'unknown error')), result.ok ? 'ok' : 'error');
+      showMessage(result.ok ? ('测试通过：' + (result.platform || '未知平台') + (result.server_running ? '，服务器运行中' : '')) : ('测试失败：' + (result.error || '未知错误')), result.ok ? 'ok' : 'error');
     }).catch(function (error) {
       if (error.code === SSH_HOST_KEY_CHANGED) {
         openHostKeyPrompt(conn.name, error.details, 'test');
@@ -473,8 +530,8 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   }
 
   function connectConnection(conn) {
-    return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/connect', { method: 'POST', body: {} }).then(function () {
-      showMessage('connected: ' + conn.name, 'ok');
+    return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/connect', { method: 'POST' }).then(function () {
+      showMessage('已连接：' + conn.name, 'ok');
     }).catch(function (error) {
       if (error.code === SSH_HOST_KEY_CHANGED) {
         openHostKeyPrompt(conn.name, error.details, 'connect');
@@ -488,11 +545,11 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     });
   }
 
-  function actionButton(label, onClick, primary) {
+  function actionButton(label, onClick, kind) {
     var button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;
-    if (primary) button.className = 'primary';
+    if (kind !== undefined) button.className = kind;
     button.addEventListener('click', function () {
       button.disabled = true;
       onClick().catch(function (error) {
@@ -588,7 +645,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       if (!entry.is_dir) {
         var download = document.createElement('button');
         download.type = 'button';
-        download.textContent = 'Download';
+        download.textContent = '下载';
         download.addEventListener('click', function () {
           download.disabled = true;
           downloadRemoteFile(consoleConnection, entry).catch(function (error) {
@@ -680,18 +737,18 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     if (consoleConnection === null) return;
     var state = stateFor(consoleConnection);
     if (state.path === null) return;
-    var input = window.prompt('New folder name in ' + state.path);
+    var input = window.prompt('在 ' + state.path + ' 下新建文件夹');
     if (input === null) return;
     var name = input.trim();
     if (name === '' || name.indexOf('/') >= 0) {
-      showMessage('folder name must be a single path segment', 'error');
+      showMessage('文件夹名称必须是单级路径段', 'error');
       return;
     }
     remoteApi(consoleConnection, '/fs:mkdir', {
       method: 'POST',
       body: { path: state.path + '/' + name }
     }).then(function () {
-      showMessage('folder created: ' + name, 'ok');
+      showMessage('文件夹已创建：' + name, 'ok');
       loadFiles(state.path);
     }).catch(function (error) {
       showMessage(error.message, 'error');
@@ -703,7 +760,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     var state = stateFor(consoleConnection);
     if (state.path === null) return;
     if (file.size > MAX_UPLOAD_BYTES) {
-      showMessage('file is too large: uploads are limited to 10 MiB', 'error');
+      showMessage('文件过大：上传大小限制为 10 MiB', 'error');
       return;
     }
     file.arrayBuffer().then(function (buffer) {
@@ -712,7 +769,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         rawBody: buffer
       });
     }).then(function () {
-      showMessage('uploaded: ' + file.name, 'ok');
+      showMessage('已上传：' + file.name, 'ok');
       loadFiles(state.path);
     }).catch(function (error) {
       showMessage(error.message, 'error');
@@ -726,7 +783,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       var contentType = res.headers.get('content-type') || '';
       if (!res.ok || contentType.indexOf('application/json') >= 0) {
         return res.json().then(function (envelope) {
-          throw new Error(envelope.msg || ('download failed with status ' + res.status));
+          throw new Error(envelope.msg || ('下载失败，状态码 ' + res.status));
         });
       }
       return res.blob();
@@ -764,20 +821,20 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       var stateTd = document.createElement('td');
       var badge = document.createElement('span');
       badge.className = 'state state-' + conn.status.state;
-      badge.textContent = conn.status.state;
+      badge.textContent = stateText(conn.status.state);
       stateTd.appendChild(badge);
       if (conn.status.needs_password) {
         stateTd.appendChild(document.createTextNode(' '));
         var needsBadge = document.createElement('span');
         needsBadge.className = 'state state-needs-password';
-        needsBadge.textContent = 'needs password';
+        needsBadge.textContent = '需要密码';
         stateTd.appendChild(needsBadge);
       }
       if (hostKeyPrompts[conn.name] !== undefined) {
         stateTd.appendChild(document.createTextNode(' '));
         var hostKeyBadge = document.createElement('span');
         hostKeyBadge.className = 'state state-host-key';
-        hostKeyBadge.textContent = 'host key changed';
+        hostKeyBadge.textContent = '主机密钥已变更';
         stateTd.appendChild(hostKeyBadge);
       }
       tr.appendChild(stateTd);
@@ -795,8 +852,8 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         return connectConnection(conn);
       }));
       actions.appendChild(actionButton('Disconnect', function () {
-        return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/disconnect', { method: 'POST', body: {} }).then(function () {
-          showMessage('disconnected: ' + conn.name, 'ok');
+        return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/disconnect', { method: 'POST' }).then(function () {
+          showMessage('已断开：' + conn.name, 'ok');
         });
       }));
       var openButton = document.createElement('button');
@@ -809,28 +866,28 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       });
       actions.appendChild(openButton);
       if (conn.status.needs_password && dismissedPrompts[conn.name]) {
-        actions.appendChild(actionButton('Enter password', function () {
+        actions.appendChild(actionButton('输入密码', function () {
           openPasswordPrompt(conn.name, null);
           return Promise.resolve();
         }));
       }
       if (conn.has_password) {
-        actions.appendChild(actionButton('Forget password', function () {
+        actions.appendChild(actionButton('忘记密码', function () {
           return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/password', { method: 'DELETE' }).then(function () {
-            showMessage('saved password cleared: ' + conn.name, 'ok');
+            showMessage('已清除保存的密码：' + conn.name, 'ok');
           });
         }));
       }
-      actions.appendChild(actionButton('Delete', function () {
-        if (!window.confirm('Delete connection ' + conn.name + '? This also removes any saved password for it.')) {
+      actions.appendChild(actionButton('删除', function () {
+        if (!window.confirm('确定删除连接 ' + conn.name + ' 吗？该连接已保存的密码也会一并移除。')) {
           return Promise.resolve();
         }
         return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name), { method: 'DELETE' }).then(function () {
           delete passwordPrompts[conn.name];
           delete hostKeyPrompts[conn.name];
-          showMessage('deleted: ' + conn.name, 'ok');
+          showMessage('已删除：' + conn.name, 'ok');
         });
-      }));
+      }, 'danger'));
       actionsTd.appendChild(actions);
       tr.appendChild(actionsTd);
       rows.appendChild(tr);
@@ -903,7 +960,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         form.reset();
         identityPanel.classList.add('hidden');
         passwordPanel.classList.add('hidden');
-        showMessage('added: ' + body.name, 'ok');
+        showMessage('已添加：' + body.name, 'ok');
         if (pendingPassword !== null) {
           openPasswordPrompt(body.name, null, pendingPassword);
           return;

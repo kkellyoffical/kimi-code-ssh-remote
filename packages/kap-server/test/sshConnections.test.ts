@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -429,20 +429,20 @@ describe('server-v2 /api/v1/ssh/connections', () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain('40931');
-    expect(body).toContain('host key changed');
+    expect(body).toContain('主机密钥已变更');
     expect(body).toContain('man-in-the-middle attack');
-    expect(body).toContain('Remove old key and retry');
+    expect(body).toContain('移除旧密钥并重试');
     expect(body).toContain('/host-key/forget');
     expect(body).toContain('host-key-row');
-    expect(body).toContain('New key fingerprint:');
+    expect(body).toContain('新密钥指纹：');
   });
 
   it('serves the management page with a delete-connection action', async () => {
     const res = await authedFetch(server as RunningServer, base, '/ssh');
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain('Delete');
-    expect(body).toContain('also removes any saved password');
+    expect(body).toContain('删除');
+    expect(body).toContain('已保存的密码也会一并移除');
   });
 
   it('never echoes passwords and persists them only with save_password', async () => {
@@ -564,9 +564,9 @@ describe('server-v2 /api/v1/ssh/connections', () => {
     expect(body).toContain('value="identity"');
     expect(body).toContain('value="password"');
     expect(body).toContain('type="password"');
-    expect(body).toContain('Remember password');
+    expect(body).toContain('记住密码');
     expect(body).toContain('secrets.json');
-    expect(body).toContain('needs password');
+    expect(body).toContain('需要密码');
     expect(body).toContain('/password');
     expect(body).toContain('40130');
   });
@@ -579,14 +579,253 @@ describe('server-v2 /api/v1/ssh/connections', () => {
     expect(body).toContain('console-select');
     expect(body).toContain('files-rows');
     expect(body).toContain('files-upload-input');
-    expect(body).toContain('New folder');
+    expect(body).toContain('新建文件夹');
     expect(body).toContain('projects-rows');
+    expect(body).toContain('/fs:home');
     expect(body).toContain('/fs:list');
     expect(body).toContain('/fs:mkdir');
     expect(body).toContain('/fs:content');
     expect(body).toContain('/workspaces');
     expect(body).toContain('kimi_origin');
   });
+
+  it('serves the management page in the dark web-ui style with a dismissible banner', async () => {
+    const res = await authedFetch(server as RunningServer, base, '/ssh');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('color-scheme: dark');
+    expect(body).toContain('SSH 连接');
+    expect(body).toContain('添加连接');
+    expect(body).toContain('连接列表');
+    expect(body).toContain('message-close');
+    expect(body).toContain('id="message" class="hidden"');
+    expect(body).toContain('#message.hidden { display: none; }');
+  });
+
+  it('serves the management page with a content-type header only when a body is present', async () => {
+    const res = await authedFetch(server as RunningServer, base, '/ssh');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('} else if (options && options.body !== undefined) {');
+    expect(body).not.toContain('body: {}');
+  });
+
+  it('accepts bodyless mutating requests and rejects empty JSON bodies', async () => {
+    await postJson<SshConnectionWire>('/api/v1/ssh/connections', {
+      name: 'bodyless',
+      host: 'example.com',
+    });
+
+    for (const action of ['test', 'connect', 'disconnect', 'host-key/forget']) {
+      const res = await authedFetch(
+        server as RunningServer,
+        base,
+        `/api/v1/ssh/connections/bodyless/${action}`,
+        { method: 'POST' },
+      );
+      expect(res.status).toBe(200);
+      const envelope = (await res.json()) as Envelope<unknown>;
+      expect(envelope.code).toBe(0);
+    }
+
+    const emptyJson = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/bodyless/test',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      },
+    );
+    const emptyJsonBody = (await emptyJson.json()) as Envelope<null>;
+    expect(emptyJsonBody.code).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(emptyJsonBody.msg).toContain('Body cannot be empty');
+
+    const cleared = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/bodyless/password',
+      { method: 'DELETE' },
+    );
+    expect(cleared.status).toBe(200);
+
+    const removed = await authedFetch(
+      server as RunningServer,
+      base,
+      '/api/v1/ssh/connections/bodyless',
+      { method: 'DELETE' },
+    );
+    expect(removed.status).toBe(200);
+  });
+});
+
+describe('server-v2 /ssh remote console end-to-end', () => {
+  let homeLocal: string | undefined;
+  let homeRemote: string | undefined;
+  let localServer: RunningServer | undefined;
+  let remoteServer: RunningServer | undefined;
+  let base: string;
+
+  beforeAll(async () => {
+    homeRemote = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-e2e-remote-'));
+    remoteServer = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: homeRemote,
+      logLevel: 'silent',
+    });
+    const remoteOrigin = `http://127.0.0.1:${remoteServer.port}`;
+    const remoteToken = remoteServer.authTokenService.getToken();
+    const fake = fakeSshConnectionManager({
+      handleFor: () => ({ localOrigin: remoteOrigin, remoteToken }),
+    });
+    homeLocal = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-e2e-local-'));
+    localServer = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: homeLocal,
+      logLevel: 'silent',
+      sshConnectionManager: fake,
+    });
+    base = `http://127.0.0.1:${localServer.port}`;
+  });
+
+  afterAll(async () => {
+    if (localServer !== undefined) await localServer.close();
+    if (remoteServer !== undefined) await remoteServer.close();
+    if (homeLocal !== undefined) await rm(homeLocal, { recursive: true, force: true });
+    if (homeRemote !== undefined) await rm(homeRemote, { recursive: true, force: true });
+  });
+
+  it('browses remote files through the proxy: home, list, mkdir, upload, download', async () => {
+    const added = await postJsonVia(
+      '/api/v1/ssh/connections',
+      { name: 'e2e', host: 'example.com' },
+    );
+    expect(added.code).toBe(0);
+
+    const connected = await postJsonVia('/api/v1/ssh/connections/e2e/connect');
+    expect(connected.code).toBe(0);
+
+    const homeRes = await authedFetch(localServer as RunningServer, base, '/ssh/e2e/api/v1/fs:home');
+    const home = (await homeRes.json()) as Envelope<{ home: string }>;
+    expect(home.code).toBe(0);
+    expect(typeof home.data.home).toBe('string');
+
+    const listedRes = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:list?path=${encodeURIComponent(homeRemote as string)}`,
+    );
+    const listed = (await listedRes.json()) as Envelope<{
+      path: string;
+      parent: string | null;
+      entries: { name: string; is_dir: boolean }[];
+    }>;
+    expect(listed.code).toBe(0);
+    expect(Array.isArray(listed.data.entries)).toBe(true);
+
+    const made = await postJsonVia('/ssh/e2e/api/v1/fs:mkdir', {
+      path: join(homeRemote as string, 'e2e-folder'),
+    });
+    expect(made.code).toBe(0);
+
+    const uploaded = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:content?path=${encodeURIComponent(join(homeRemote as string, 'e2e-folder', 'hello.txt'))}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: 'hello ssh e2e',
+      },
+    );
+    const uploadedBody = (await uploaded.json()) as Envelope<unknown>;
+    expect(uploadedBody.code).toBe(0);
+
+    const downloaded = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:content?path=${encodeURIComponent(join(homeRemote as string, 'e2e-folder', 'hello.txt'))}`,
+    );
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('hello ssh e2e');
+
+    const relistedRes = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:list?path=${encodeURIComponent(join(homeRemote as string, 'e2e-folder'))}`,
+    );
+    const relisted = (await relistedRes.json()) as Envelope<{
+      parent: string | null;
+      entries: { name: string; is_dir: boolean }[];
+    }>;
+    expect(relisted.code).toBe(0);
+    expect(relisted.data.parent).toBe(await realpath(homeRemote as string));
+    expect(
+      relisted.data.entries.some((entry) => entry.name === 'hello.txt' && !entry.is_dir),
+    ).toBe(true);
+  });
+
+  it('lists and creates remote projects through the proxy', async () => {
+    const created = await postJsonVia('/ssh/e2e/api/v1/workspaces', {
+      root: homeRemote as string,
+      name: 'e2e-ws',
+    });
+    expect(created.code).toBe(0);
+
+    const res = await authedFetch(localServer as RunningServer, base, '/ssh/e2e/api/v1/workspaces');
+    const body = (await res.json()) as Envelope<{
+      items: { name: string; root: string; session_count: number }[];
+    }>;
+    expect(body.code).toBe(0);
+    const ws = body.data.items.find((item) => item.name === 'e2e-ws');
+    expect(ws?.root).toBe(homeRemote);
+    expect(typeof ws?.session_count).toBe('number');
+  });
+
+  it('supports bodyless disconnect, host-key forget, password delete, and delete', async () => {
+    const disconnected = await postJsonVia('/api/v1/ssh/connections/e2e/disconnect');
+    expect(disconnected.code).toBe(0);
+
+    const forgotten = await postJsonVia('/api/v1/ssh/connections/e2e/host-key/forget');
+    expect(forgotten.code).toBe(0);
+
+    const cleared = await authedFetch(
+      localServer as RunningServer,
+      base,
+      '/api/v1/ssh/connections/e2e/password',
+      { method: 'DELETE' },
+    );
+    const clearedBody = (await cleared.json()) as Envelope<unknown>;
+    expect(clearedBody.code).toBe(0);
+
+    const removed = await authedFetch(
+      localServer as RunningServer,
+      base,
+      '/api/v1/ssh/connections/e2e',
+      { method: 'DELETE' },
+    );
+    const removedBody = (await removed.json()) as Envelope<{ name: string }>;
+    expect(removedBody.code).toBe(0);
+    expect(removedBody.data).toEqual({ name: 'e2e' });
+
+    const after = await authedFetch(localServer as RunningServer, base, '/api/v1/ssh/connections/e2e');
+    const afterBody = (await after.json()) as Envelope<null>;
+    expect(afterBody.code).toBe(ErrorCode.SSH_CONNECTION_NOT_FOUND);
+  });
+
+  async function postJsonVia(path: string, body?: unknown): Promise<Envelope<never>> {
+    const res = await authedFetch(localServer as RunningServer, base, path, {
+      method: 'POST',
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as Envelope<never>;
+  }
 });
 
 describe('server-v2 /api/v1/ssh/connections write gate', () => {
