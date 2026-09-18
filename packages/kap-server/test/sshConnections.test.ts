@@ -571,22 +571,31 @@ describe('server-v2 /api/v1/ssh/connections', () => {
     expect(body).toContain('40130');
   });
 
-  it('serves the management page with remote console file and project sections', async () => {
+  it('serves the management page without remote console file and project sections', async () => {
     const res = await authedFetch(server as RunningServer, base, '/ssh');
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain('Remote console');
-    expect(body).toContain('console-select');
-    expect(body).toContain('files-rows');
-    expect(body).toContain('files-upload-input');
-    expect(body).toContain('新建文件夹');
-    expect(body).toContain('projects-rows');
-    expect(body).toContain('/fs:home');
-    expect(body).toContain('/fs:list');
-    expect(body).toContain('/fs:mkdir');
-    expect(body).toContain('/fs:content');
-    expect(body).toContain('/workspaces');
+    expect(body).not.toContain('Remote console');
+    expect(body).not.toContain('console-select');
+    expect(body).not.toContain('files-rows');
+    expect(body).not.toContain('files-upload-input');
+    expect(body).not.toContain('新建文件夹');
+    expect(body).not.toContain('projects-rows');
+    expect(body).not.toContain('/fs:home');
+    expect(body).not.toContain('/fs:list');
+    expect(body).not.toContain('/fs:mkdir');
+    expect(body).not.toContain('/fs:content');
+    expect(body).not.toContain('/workspaces');
     expect(body).toContain('kimi_origin');
+  });
+
+  it('serves the management page with a reconnecting badge for connections that drop into reconnect', async () => {
+    const res = await authedFetch(server as RunningServer, base, '/ssh');
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('重连中');
+    expect(body).toContain("lastStates[conn.name] === 'on'");
+    expect(body).toContain('state-connecting');
   });
 
   it('serves the management page in the dark web-ui style with a dismissible banner', async () => {

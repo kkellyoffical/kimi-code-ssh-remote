@@ -37,7 +37,6 @@ const SSH_PAGE_HTML = `<!doctype html>
   --warning: hsl(32, 65%, 58%);
   --danger: hsl(0, 60%, 50%);
   --danger-fg: hsl(0, 70%, 68%);
-  --info: hsl(215, 55%, 62%);
 }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 32px 24px 48px; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.6; }
@@ -49,7 +48,6 @@ main { max-width: 960px; margin: 0 auto; }
 .hidden { display: none; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px 20px; margin-top: 16px; }
 .card h2 { font-size: 15px; font-weight: 600; margin: 0; }
-.card h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 20px 0 0; }
 #message { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; padding: 10px 14px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; }
 #message.hidden { display: none; }
 #message.msg-error { background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger-fg); }
@@ -87,8 +85,6 @@ button.primary:hover { background: #ffffff; }
 button.primary:disabled:hover { background: var(--primary-bg); }
 button.danger { color: var(--danger-fg); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 button.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
-button.link { border: none; background: none; padding: 0; color: var(--info); text-align: left; }
-button.link:hover { background: none; text-decoration: underline; }
 .state { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 12px; line-height: 18px; white-space: nowrap; }
 .state-on { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
 .state-off { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
@@ -105,20 +101,13 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
 .host-key-box p { margin: 2px 0; }
 .host-key-box .host-key-title { margin: 0 0 4px; font-weight: 600; color: var(--danger-fg); }
 .host-key-box .row-actions { margin-top: 10px; }
-.console-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.console-head h2 { margin: 0; }
-.console-head select { min-width: 220px; }
-.console-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
-.path-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); background: var(--inset); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; word-break: break-all; }
-.inline-error { margin: 10px 0 0; padding: 8px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger-fg); font-size: 13px; white-space: pre-wrap; }
-.size-cell, .mtime-cell { white-space: nowrap; font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
 <main>
 <header class="page-head">
 <h1>SSH 连接</h1>
-<p class="muted">注册并管理远程机器，连接后可浏览远程文件与项目。</p>
+<p class="muted">注册并管理远程机器，连接后通过 Open 打开远程 Kimi Code 界面。</p>
 </header>
 <section id="token-section" class="card hidden">
 <h2>访问令牌</h2>
@@ -164,45 +153,12 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
 </table>
 <p class="muted" id="empty-hint">暂无连接，先在上方添加一台远程机器。</p>
 </section>
-<section class="card">
-<div class="console-head">
-<h2>Remote console</h2>
-<select id="console-select" class="mono"></select>
-</div>
-<p class="muted" id="console-empty">添加连接后即可浏览远程文件与项目。</p>
-<div id="console-section" class="hidden">
-<h3>文件</h3>
-<div class="console-bar">
-<button type="button" id="files-up">上级</button>
-<button type="button" id="files-refresh">刷新</button>
-<button type="button" id="files-mkdir">新建文件夹</button>
-<button type="button" id="files-upload">上传</button>
-<input type="file" id="files-upload-input" class="hidden">
-<span class="path-text" id="files-path"></span>
-</div>
-<div id="files-error" class="inline-error hidden"></div>
-<table>
-<thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
-<tbody id="files-rows"></tbody>
-</table>
-<h3>项目</h3>
-<div class="console-bar">
-<button type="button" id="projects-refresh">刷新</button>
-</div>
-<div id="projects-error" class="inline-error hidden"></div>
-<table>
-<thead><tr><th>名称</th><th>根目录</th><th>会话数</th><th>操作</th></tr></thead>
-<tbody id="projects-rows"></tbody>
-</table>
-</div>
-</section>
 </section>
 </main>
 <script>
 (function () {
   var SSH_AUTH_REQUIRED = 40130;
   var SSH_HOST_KEY_CHANGED = 40931;
-  var MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
   var tokenSection = document.getElementById('token-section');
   var mainSection = document.getElementById('main-section');
   var messageBox = document.getElementById('message');
@@ -214,12 +170,9 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   var dismissedPrompts = {};
   var hostKeyPrompts = {};
   var dismissedHostKey = {};
-  var consoleSelect = document.getElementById('console-select');
-  var consoleEmpty = document.getElementById('console-empty');
-  var consoleSection = document.getElementById('console-section');
-  var consoleConnection = null;
-  var consoleState = {};
   var knownConnections = [];
+  var lastStates = {};
+  var reconnectingNames = {};
 
   function readToken() {
     var hash = location.hash.replace(/^#/, '');
@@ -288,10 +241,6 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     return rawApi(path, options);
   }
 
-  function remoteApi(name, path, options) {
-    return rawApi('/ssh/' + encodeURIComponent(name) + '/api/v1' + path, options);
-  }
-
   function targetText(conn) {
     var target = conn.user ? conn.user + '@' + conn.host : conn.host;
     return target + ':' + conn.port;
@@ -316,6 +265,20 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     if (state === 'connecting') return '连接中';
     if (state === 'error') return '错误';
     return '未连接';
+  }
+
+  function trackReconnects(connections) {
+    var nextReconnecting = {};
+    var nextStates = {};
+    connections.forEach(function (conn) {
+      var state = conn.status.state;
+      if (state === 'connecting' && (lastStates[conn.name] === 'on' || reconnectingNames[conn.name] === true)) {
+        nextReconnecting[conn.name] = true;
+      }
+      nextStates[conn.name] = state;
+    });
+    lastStates = nextStates;
+    reconnectingNames = nextReconnecting;
   }
 
   function anyPromptOpen() {
@@ -562,244 +525,8 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     return button;
   }
 
-  function formatSize(size) {
-    if (size === undefined || size === null) return '';
-    if (size < 1024) return size + ' B';
-    if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB';
-    return (size / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-
-  function formatTime(iso) {
-    if (!iso) return '';
-    var date = new Date(iso);
-    if (isNaN(date.getTime())) return '';
-    return date.toLocaleString();
-  }
-
-  function stateFor(name) {
-    if (consoleState[name] === undefined) {
-      consoleState[name] = { path: null, parent: null, entries: [], filesError: null, projects: [], projectsError: null, loaded: false };
-    }
-    return consoleState[name];
-  }
-
-  function renderConsoleSelect() {
-    var previous = consoleConnection;
-    consoleSelect.textContent = '';
-    knownConnections.forEach(function (conn) {
-      var option = document.createElement('option');
-      option.value = conn.name;
-      option.textContent = conn.name + ' (' + targetText(conn) + ')';
-      consoleSelect.appendChild(option);
-    });
-    var names = knownConnections.map(function (conn) { return conn.name; });
-    if (previous !== null && names.indexOf(previous) >= 0) {
-      consoleConnection = previous;
-    } else {
-      consoleConnection = names.length > 0 ? names[0] : null;
-    }
-    consoleSelect.value = consoleConnection || '';
-    consoleEmpty.classList.toggle('hidden', consoleConnection !== null);
-    consoleSection.classList.toggle('hidden', consoleConnection === null);
-    if (consoleConnection !== null) {
-      renderConsole();
-      if (!stateFor(consoleConnection).loaded) loadConsole();
-    }
-  }
-
-  function renderConsole() {
-    if (consoleConnection === null) return;
-    var state = stateFor(consoleConnection);
-    document.getElementById('files-path').textContent = state.path || '';
-    var filesError = document.getElementById('files-error');
-    filesError.textContent = state.filesError || '';
-    filesError.classList.toggle('hidden', state.filesError === null);
-    var filesRows = document.getElementById('files-rows');
-    filesRows.textContent = '';
-    state.entries.forEach(function (entry) {
-      var tr = document.createElement('tr');
-      var nameTd = document.createElement('td');
-      if (entry.is_dir) {
-        var openDir = document.createElement('button');
-        openDir.type = 'button';
-        openDir.className = 'link mono';
-        openDir.textContent = entry.name + '/';
-        openDir.addEventListener('click', function () {
-          loadFiles(entry.path);
-        });
-        nameTd.appendChild(openDir);
-      } else {
-        nameTd.textContent = entry.name;
-        nameTd.className = 'mono';
-      }
-      tr.appendChild(nameTd);
-      var sizeTd = document.createElement('td');
-      sizeTd.className = 'size-cell';
-      sizeTd.textContent = entry.is_dir ? '' : formatSize(entry.size);
-      tr.appendChild(sizeTd);
-      var mtimeTd = document.createElement('td');
-      mtimeTd.className = 'mtime-cell';
-      mtimeTd.textContent = formatTime(entry.modified_at);
-      tr.appendChild(mtimeTd);
-      var actionsTd = document.createElement('td');
-      if (!entry.is_dir) {
-        var download = document.createElement('button');
-        download.type = 'button';
-        download.textContent = '下载';
-        download.addEventListener('click', function () {
-          download.disabled = true;
-          downloadRemoteFile(consoleConnection, entry).catch(function (error) {
-            showMessage(error.message, 'error');
-          }).finally(function () {
-            download.disabled = false;
-          });
-        });
-        actionsTd.appendChild(download);
-      }
-      tr.appendChild(actionsTd);
-      filesRows.appendChild(tr);
-    });
-    var projectsError = document.getElementById('projects-error');
-    projectsError.textContent = state.projectsError || '';
-    projectsError.classList.toggle('hidden', state.projectsError === null);
-    var projectsRows = document.getElementById('projects-rows');
-    projectsRows.textContent = '';
-    state.projects.forEach(function (ws) {
-      var tr = document.createElement('tr');
-      var nameTd = document.createElement('td');
-      nameTd.textContent = ws.name;
-      tr.appendChild(nameTd);
-      var rootTd = document.createElement('td');
-      rootTd.textContent = ws.root;
-      rootTd.className = 'mono muted';
-      tr.appendChild(rootTd);
-      var countTd = document.createElement('td');
-      countTd.textContent = String(ws.session_count);
-      tr.appendChild(countTd);
-      var actionsTd = document.createElement('td');
-      var open = document.createElement('button');
-      open.type = 'button';
-      open.textContent = 'Open';
-      open.addEventListener('click', function () {
-        var origin = location.origin;
-        var url = origin + '/?kimi_origin=' + encodeURIComponent(origin + '/ssh/' + consoleConnection) + '#token=' + encodeURIComponent(token);
-        window.open(url, '_blank', 'noopener');
-      });
-      actionsTd.appendChild(open);
-      tr.appendChild(actionsTd);
-      projectsRows.appendChild(tr);
-    });
-  }
-
-  function loadFiles(path) {
-    if (consoleConnection === null) return Promise.resolve();
-    var name = consoleConnection;
-    var state = stateFor(name);
-    state.filesError = null;
-    var request = path === null
-      ? remoteApi(name, '/fs:home').then(function (home) {
-          return remoteApi(name, '/fs:list?path=' + encodeURIComponent(home.home));
-        })
-      : remoteApi(name, '/fs:list?path=' + encodeURIComponent(path));
-    return request.then(function (data) {
-      state.path = data.path;
-      state.parent = data.parent;
-      state.entries = data.entries || [];
-      renderConsole();
-    }).catch(function (error) {
-      state.filesError = error.message;
-      renderConsole();
-    });
-  }
-
-  function loadProjects() {
-    if (consoleConnection === null) return Promise.resolve();
-    var name = consoleConnection;
-    var state = stateFor(name);
-    state.projectsError = null;
-    return remoteApi(name, '/workspaces').then(function (data) {
-      state.projects = data.items || [];
-      renderConsole();
-    }).catch(function (error) {
-      state.projectsError = error.message;
-      renderConsole();
-    });
-  }
-
-  function loadConsole() {
-    if (consoleConnection === null) return;
-    stateFor(consoleConnection).loaded = true;
-    loadFiles(null);
-    loadProjects();
-  }
-
-  function mkdirRemote() {
-    if (consoleConnection === null) return;
-    var state = stateFor(consoleConnection);
-    if (state.path === null) return;
-    var input = window.prompt('在 ' + state.path + ' 下新建文件夹');
-    if (input === null) return;
-    var name = input.trim();
-    if (name === '' || name.indexOf('/') >= 0) {
-      showMessage('文件夹名称必须是单级路径段', 'error');
-      return;
-    }
-    remoteApi(consoleConnection, '/fs:mkdir', {
-      method: 'POST',
-      body: { path: state.path + '/' + name }
-    }).then(function () {
-      showMessage('文件夹已创建：' + name, 'ok');
-      loadFiles(state.path);
-    }).catch(function (error) {
-      showMessage(error.message, 'error');
-    });
-  }
-
-  function uploadRemote(file) {
-    if (consoleConnection === null) return;
-    var state = stateFor(consoleConnection);
-    if (state.path === null) return;
-    if (file.size > MAX_UPLOAD_BYTES) {
-      showMessage('文件过大：上传大小限制为 10 MiB', 'error');
-      return;
-    }
-    file.arrayBuffer().then(function (buffer) {
-      return remoteApi(consoleConnection, '/fs:content?path=' + encodeURIComponent(state.path + '/' + file.name), {
-        method: 'PUT',
-        rawBody: buffer
-      });
-    }).then(function () {
-      showMessage('已上传：' + file.name, 'ok');
-      loadFiles(state.path);
-    }).catch(function (error) {
-      showMessage(error.message, 'error');
-    });
-  }
-
-  function downloadRemoteFile(name, entry) {
-    return fetch('/ssh/' + encodeURIComponent(name) + '/api/v1/fs:content?path=' + encodeURIComponent(entry.path), {
-      headers: { authorization: 'Bearer ' + token }
-    }).then(function (res) {
-      var contentType = res.headers.get('content-type') || '';
-      if (!res.ok || contentType.indexOf('application/json') >= 0) {
-        return res.json().then(function (envelope) {
-          throw new Error(envelope.msg || ('下载失败，状态码 ' + res.status));
-        });
-      }
-      return res.blob();
-    }).then(function (blob) {
-      var url = URL.createObjectURL(blob);
-      var anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = entry.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-    });
-  }
-
   function render(connections) {
+    trackReconnects(connections);
     rows.textContent = '';
     emptyHint.classList.toggle('hidden', connections.length > 0);
     connections.forEach(function (conn) {
@@ -821,7 +548,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       var stateTd = document.createElement('td');
       var badge = document.createElement('span');
       badge.className = 'state state-' + conn.status.state;
-      badge.textContent = stateText(conn.status.state);
+      badge.textContent = reconnectingNames[conn.name] === true ? '重连中' : stateText(conn.status.state);
       stateTd.appendChild(badge);
       if (conn.status.needs_password) {
         stateTd.appendChild(document.createTextNode(' '));
@@ -904,12 +631,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         rows.appendChild(hostKeyPromptRow(conn, hostKeyPrompts[conn.name]));
       }
     });
-    var names = connections.map(function (conn) { return conn.name; });
-    Object.keys(consoleState).forEach(function (name) {
-      if (names.indexOf(name) < 0) delete consoleState[name];
-    });
     knownConnections = connections;
-    renderConsoleSelect();
   }
 
   function refresh(force) {
@@ -970,32 +692,6 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         showMessage(error.message, 'error');
       });
     });
-    consoleSelect.addEventListener('change', function () {
-      consoleConnection = consoleSelect.value === '' ? null : consoleSelect.value;
-      renderConsole();
-      loadConsole();
-    });
-    document.getElementById('files-up').addEventListener('click', function () {
-      if (consoleConnection === null) return;
-      var state = stateFor(consoleConnection);
-      if (state.parent !== null) loadFiles(state.parent);
-    });
-    document.getElementById('files-refresh').addEventListener('click', function () {
-      if (consoleConnection === null) return;
-      loadFiles(stateFor(consoleConnection).path);
-    });
-    document.getElementById('files-mkdir').addEventListener('click', mkdirRemote);
-    var uploadInput = document.getElementById('files-upload-input');
-    document.getElementById('files-upload').addEventListener('click', function () {
-      uploadInput.value = '';
-      uploadInput.click();
-    });
-    uploadInput.addEventListener('change', function () {
-      if (uploadInput.files && uploadInput.files.length > 0) {
-        uploadRemote(uploadInput.files[0]);
-      }
-    });
-    document.getElementById('projects-refresh').addEventListener('click', loadProjects);
     refresh();
     pollTimer = setInterval(refresh, 3000);
     window.addEventListener('beforeunload', function () {
