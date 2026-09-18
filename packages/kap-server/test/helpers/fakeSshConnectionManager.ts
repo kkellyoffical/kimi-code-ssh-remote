@@ -44,7 +44,6 @@ export function fakeSshConnectionManager(
   opts: FakeSshConnectionManagerOptions = {},
 ): FakeSshConnectionManager {
   const entries = new Map<string, FakeEntry>();
-  const passwords = new Map<string, string>();
   const connectCalls: string[] = [];
   const connectOptions: (SshAuthOptions | undefined)[] = [];
 
@@ -124,25 +123,12 @@ export function fakeSshConnectionManager(
       entry.state = 'off';
       entry.handle = undefined;
       entries.delete(name);
-      passwords.delete(name);
     },
     async setPassword(name: string, password: string) {
-      requireEntry(name);
-      if (password.length === 0) {
-        throw new SshRemoteError('config', 'password must not be empty');
-      }
-      passwords.set(name, password);
-    },
-    async clearPassword(name: string) {
-      requireEntry(name);
-      passwords.delete(name);
-    },
-    async setPassword(name: string, password: string) {
-      requireEntry(name);
-      if (password.length === 0) {
-        throw new SshRemoteError('config', 'password must not be empty');
-      }
       const entry = requireEntry(name);
+      if (password.length === 0) {
+        throw new SshRemoteError('config', 'password must not be empty');
+      }
       entry.password = password;
     },
     async clearPassword(name: string) {
