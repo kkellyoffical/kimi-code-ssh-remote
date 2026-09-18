@@ -231,16 +231,16 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
     async scanHostKey(name) {
       const data = await call<WireHostKeyScan>(
         'GET',
-        `/${encodeURIComponent(name)}/host-key`,
+        `/${encodeURIComponent(name)}/host-key/forget`,
       );
       return {
         host: data.host,
         port: data.port,
-        keys: data.keys.map((key) => ({ keyType: key.type, fingerprint: key.fingerprint })),
+        keys: data.keys.map((key) => ({ keyType: key.key_type, fingerprint: key.fingerprint })),
       };
     },
     async forgetHostKey(name) {
-      await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}/host-key`);
+      await call<Record<string, never>>('POST', `/${encodeURIComponent(name)}/host-key/forget`);
     },
   };
 }
@@ -279,5 +279,5 @@ function fromWireHostKeyDetails(
 interface WireHostKeyScan {
   host: string;
   port: number;
-  keys: { type: string; fingerprint: string }[];
+  keys: { key_type: string; fingerprint: string }[];
 }

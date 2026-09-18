@@ -1617,6 +1617,117 @@ describe('ssh REST client', () => {
     expect(failure).toBeInstanceOf(SshApiError);
     expect((failure as SshApiError).message).toContain('cannot reach the local server');
   });
+
+  it('scans and forgets host keys on the host-key/forget endpoint', async () => {
+    const calls: { url: string; method: string | undefined }[] = [];
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async (url, init) => {
+        calls.push({ url, method: init.method });
+        if (init.method === 'GET') {
+          return jsonResponse(
+            envelope({
+              name: 'prod',
+              host: 'example.com',
+              port: 2222,
+              keys: [
+                { key_type: 'ssh-ed25519', fingerprint: 'SHA256:EdKey111' },
+                { key_type: 'ecdsa-sha2-nistp256', fingerprint: 'SHA256:EcKey222' },
+              ],
+            }),
+          );
+        }
+        return jsonResponse(envelope({ name: 'prod', forgotten: true }));
+      }),
+    });
+    const scan = await client.scanHostKey('prod');
+    expect(scan).toEqual({
+      host: 'example.com',
+      port: 2222,
+      keys: [
+        { keyType: 'ssh-ed25519', fingerprint: 'SHA256:EdKey111' },
+        { keyType: 'ecdsa-sha2-nistp256', fingerprint: 'SHA256:EcKey222' },
+      ],
+    });
+    await client.forgetHostKey('prod');
+    expect(calls).toEqual([
+      {
+        url: 'http://127.0.0.1:58627/api/v1/ssh/connections/prod/host-key/forget',
+        method: 'GET',
+      },
+      {
+        url: 'http://127.0.0.1:58627/api/v1/ssh/connections/prod/host-key/forget',
+        method: 'POST',
+      },
+    ]);
+  });
+
+  it('carries the 40931 envelope details on SshApiError', async () => {
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async () =>
+        jsonResponse(
+          {
+            code: 40931,
+            msg: 'host key for example.com:22 has changed',
+            data: null,
+            request_id: 'r',
+            details: {
+              host: 'example.com',
+              port: 22,
+              fingerprint: 'SHA256:New',
+              key_type: 'ssh-ed25519',
+              expected_fingerprint: 'SHA256:Old',
+              known_hosts_file: '/home/user/.ssh/known_hosts',
+              known_hosts_line: 12,
+            },
+          },
+          409,
+        ),
+      ),
+    });
+    const failure = await client.connect('prod').catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SshApiError);
+    expect((failure as SshApiError).code).toBe(SSH_HOST_KEY_CHANGED_CODE);
+    expect((failure as SshApiError).details).toMatchObject({
+      fingerprint: 'SHA256:New',
+      expected_fingerprint: 'SHA256:Old',
+      known_hosts_line: 12,
+    });
+  });
+
+  it('maps a host_key payload on a failed test result', async () => {
+    const client = createSshRestClient({
+      origin: 'http://127.0.0.1:58627',
+      token: 'tok',
+      fetchFn: fakeFetch(async () =>
+        jsonResponse(
+          envelope({
+            ok: false,
+            error: 'Host key verification failed.',
+            host_key: {
+              fingerprint: 'SHA256:New',
+              key_type: 'ssh-ed25519',
+              expected_fingerprint: 'SHA256:Old',
+              known_hosts_file: '/home/user/.ssh/known_hosts',
+              known_hosts_line: 12,
+            },
+          }),
+        ),
+      ),
+    });
+    const result = await client.test('prod');
+    expect(result.ok).toBe(false);
+    expect((result as SshTestResult & { hostKey?: unknown }).hostKey).toEqual({
+      fingerprint: 'SHA256:New',
+      keyType: 'ssh-ed25519',
+      expectedFingerprint: 'SHA256:Old',
+      knownHostsFile: '/home/user/.ssh/known_hosts',
+      knownHostsLine: 12,
+    });
+  });
 });
 
 describe('local registry integration (temp home, no server)', () => {
