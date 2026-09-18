@@ -206,6 +206,7 @@ kimi ssh list                          # saved connections + auth method + live 
 kimi ssh passwd prod                   # save the connection's password (hidden prompt)
 kimi ssh test prod                     # probe connectivity and the remote setup
 kimi ssh connect prod                  # establish the tunnel and open the remote web UI
+kimi ssh host-key prod                 # show the remote's host key fingerprint (--forget removes the stored key)
 kimi ssh remove prod                   # delete a saved connection
 ```
 
@@ -217,6 +218,7 @@ kimi ssh remove prod                   # delete a saved connection
 | `kimi ssh remove <name>` | Delete a saved connection, disconnecting it first when connected |
 | `kimi ssh test <name>` | Run an SSH handshake and report the remote platform, kimi install state, and server state; `--password` prompts for a password first |
 | `kimi ssh connect <name>` | Establish the tunnel and print the remote web UI URL; `--password` prompts for a password first |
+| `kimi ssh host-key <name>` | Scan and show the host key fingerprint the remote currently presents; `--forget` removes the stored key so the next connection re-trusts |
 
 `connect` has two modes. With a running local server (the default), the server holds the tunnel and the command prints two URLs: the remote web UI (the local web UI pointed at the remote through the `?kimi_origin=` query parameter) and the server's built-in `/ssh` management page. Without a server — or with `--direct` — this terminal holds the tunnel until `Ctrl+C`, and the printed URL points at the remote's own web UI on the tunnel port. `--no-open` skips opening the browser.
 
@@ -233,6 +235,14 @@ Every connection attempt tries public-key authentication first — the ssh-agent
 ::: warning
 Saved passwords are stored as plaintext in `~/.kimi-code/ssh/secrets.json` (file mode `0600`). Anyone who can read that file can read the passwords, so prefer key-based authentication on shared machines; saving a password is always opt-in.
 :::
+
+#### Host key verification
+
+`kimi ssh` verifies the remote's identity with SSH host keys, using the same `known_hosts` file as the system `ssh`. The first connection to a host trusts the presented key automatically and records it (`StrictHostKeyChecking=accept-new`); every later connection must present the same key.
+
+When the presented key stops matching the stored one, `kimi ssh test` and `kimi ssh connect` refuse to continue and print both fingerprints — the stored one and the one the remote presents now. A changed key can mean a man-in-the-middle attack, but it also happens legitimately when the remote is reinstalled, its keys are rotated, or a different machine takes over the address. Compare the presented fingerprint with the remote's actual key before proceeding.
+
+To inspect the key a remote currently presents, run `kimi ssh host-key prod`. When you have confirmed the change is expected, remove the stale key with `kimi ssh host-key prod --forget`; the next connection then trusts the new key, again under accept-new. In an interactive terminal, `test` and `connect` offer to forget the old key and retry right after printing the comparison; non-interactive runs fail with the same instructions. The manual equivalent is `ssh-keygen -R <host>` (or `ssh-keygen -R '[host]:port'` for a non-default port).
 
 ### `kimi install-desktop`
 

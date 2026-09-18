@@ -896,7 +896,7 @@ describe('kimi ssh connect', () => {
       close: async () => {
         closed = true;
       },
-    } satisfies SshConnectionManager;
+    } as SshConnectionManager;
     const { deps, io, opened } = makeDeps({
       createLocalManager: () => manager,
       holdForeground: async (onShutdown) => {
@@ -934,7 +934,7 @@ describe('kimi ssh connect', () => {
       forgetHostKey: async () => {},
       status: () => ({ state: 'off' as const }),
       close: async () => {},
-    } satisfies SshConnectionManager;
+    } as SshConnectionManager;
     const { deps } = makeDeps({
       getLiveServer: async () => LIVE_SERVER,
       createRestClient: () => {
@@ -1151,7 +1151,7 @@ describe('host-key-changed handling', () => {
       },
       status: () => ({ state: 'on' as const, localOrigin: 'http://127.0.0.1:49001' }),
       close: async () => {},
-    } satisfies SshConnectionManager;
+    } as SshConnectionManager;
     const { deps, io } = makeDeps({
       createLocalManager: () => manager,
       isInteractive: () => true,
