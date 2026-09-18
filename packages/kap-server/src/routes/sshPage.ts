@@ -53,6 +53,7 @@ form.add button[type="submit"] { margin-top: 12px; }
 .state-connecting { background: #fef9c3; color: #854d0e; }
 .state-error { background: #fee2e2; color: #991b1b; }
 .state-needs-password { background: #ffedd5; color: #9a3412; }
+.state-host-key { background: #fef3c7; color: #92400e; }
 .msg { margin: 8px 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; }
 .msg-error { background: #fee2e2; color: #991b1b; }
 .msg-ok { background: #dcfce7; color: #166534; }
@@ -61,6 +62,10 @@ form.add button[type="submit"] { margin-top: 12px; }
 .hidden { display: none; }
 .muted { opacity: 0.6; }
 tr.password-row td { padding: 8px 10px; background: color-mix(in srgb, CanvasText 4%, transparent); }
+tr.host-key-row td { padding: 8px 10px; background: color-mix(in srgb, CanvasText 4%, transparent); }
+.host-key-box p { margin: 2px 0; }
+.host-key-box .host-key-title { margin: 0 0 4px; font-weight: 600; color: #991b1b; }
+.host-key-box .row-actions { margin-top: 8px; }
 form.password-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
 form.password-form label { min-width: 200px; }
 form.password-form .risk { flex-basis: 100%; margin: 0; font-size: 12px; }
@@ -154,6 +159,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
 <script>
 (function () {
   var SSH_AUTH_REQUIRED = 40130;
+  var SSH_HOST_KEY_CHANGED = 40931;
   var MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
   var tokenSection = document.getElementById('token-section');
   var mainSection = document.getElementById('main-section');
@@ -163,6 +169,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   var pollTimer = null;
   var passwordPrompts = {};
   var dismissedPrompts = {};
+  var hostKeyPrompts = {};
   var consoleSelect = document.getElementById('console-select');
   var consoleEmpty = document.getElementById('console-empty');
   var consoleSection = document.getElementById('console-section');
@@ -218,6 +225,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         if (envelope.code !== 0) {
           var error = new Error(envelope.msg || ('request failed with code ' + envelope.code));
           error.code = envelope.code;
+          error.details = envelope.details;
           throw error;
         }
         return envelope.data;
@@ -253,7 +261,7 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
   }
 
   function anyPromptOpen() {
-    return Object.keys(passwordPrompts).length > 0;
+    return Object.keys(passwordPrompts).length > 0 || Object.keys(hostKeyPrompts).length > 0;
   }
 
   function openPasswordPrompt(name, error, prefill) {
@@ -287,6 +295,11 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       for (var i = 0; i < buttons.length; i++) buttons[i].disabled = false;
       input.value = '';
       input.focus();
+      if (error.code === SSH_HOST_KEY_CHANGED) {
+        delete passwordPrompts[conn.name];
+        openHostKeyPrompt(conn.name, error.details, 'connect');
+        return;
+      }
       if (error.code === SSH_AUTH_REQUIRED) {
         errorLine.textContent = 'authentication failed, please check the password and try again';
       } else {
@@ -347,6 +360,130 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
     td.appendChild(form);
     tr.appendChild(td);
     return tr;
+  }
+
+  function openHostKeyPrompt(name, details, retry) {
+    hostKeyPrompts[name] = { details: details || null, retry: retry };
+    refresh(true);
+  }
+
+  function forgetHostKeyAndRetry(name) {
+    var prompt = hostKeyPrompts[name];
+    if (prompt === undefined) return Promise.resolve();
+    return api('/api/v1/ssh/connections/' + encodeURIComponent(name) + '/host-key/forget', {
+      method: 'POST'
+    }).then(function () {
+      delete hostKeyPrompts[name];
+      showMessage('old host key removed for ' + name + ', retrying', 'ok');
+      var conn = null;
+      for (var i = 0; i < knownConnections.length; i++) {
+        if (knownConnections[i].name === name) conn = knownConnections[i];
+      }
+      if (conn === null) return undefined;
+      return prompt.retry === 'test' ? testConnection(conn) : connectConnection(conn);
+    });
+  }
+
+  function hostKeyPromptRow(conn, prompt) {
+    var tr = document.createElement('tr');
+    tr.className = 'host-key-row';
+    var td = document.createElement('td');
+    td.colSpan = 6;
+    var box = document.createElement('div');
+    box.className = 'host-key-box';
+    var title = document.createElement('p');
+    title.className = 'host-key-title';
+    title.textContent = 'Warning: the host key for ' + targetText(conn) + ' has changed';
+    box.appendChild(title);
+    var explain = document.createElement('p');
+    explain.className = 'muted';
+    explain.textContent = 'The server may have been reinstalled or its host key rotated, but this could also be a man-in-the-middle attack. Verify the new fingerprint with the server administrator before trusting it.';
+    box.appendChild(explain);
+    var details = prompt.details;
+    if (details !== null) {
+      if (details.fingerprint) {
+        var presented = document.createElement('p');
+        presented.className = 'mono';
+        presented.textContent = 'New key fingerprint: ' + details.fingerprint + (details.key_type ? ' (' + details.key_type + ')' : '');
+        box.appendChild(presented);
+      }
+      if (details.expected_fingerprint) {
+        var expected = document.createElement('p');
+        expected.className = 'mono';
+        expected.textContent = 'Previously trusted fingerprint: ' + details.expected_fingerprint;
+        box.appendChild(expected);
+      }
+      if (details.known_hosts_file) {
+        var knownHosts = document.createElement('p');
+        knownHosts.className = 'mono muted';
+        knownHosts.textContent = 'Stored in ' + details.known_hosts_file + (details.known_hosts_line ? ' (line ' + details.known_hosts_line + ')' : '');
+        box.appendChild(knownHosts);
+      }
+    }
+    var buttons = document.createElement('div');
+    buttons.className = 'row-actions';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', function () {
+      delete hostKeyPrompts[conn.name];
+      refresh(true);
+    });
+    var retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'primary';
+    retry.textContent = 'Remove old key and retry';
+    retry.addEventListener('click', function () {
+      retry.disabled = true;
+      cancel.disabled = true;
+      forgetHostKeyAndRetry(conn.name).catch(function (error) {
+        showMessage(error.message, 'error');
+      }).finally(function () {
+        refresh(true);
+      });
+    });
+    buttons.appendChild(retry);
+    buttons.appendChild(cancel);
+    box.appendChild(buttons);
+    td.appendChild(box);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function testConnection(conn) {
+    return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/test', { method: 'POST', body: {} }).then(function (result) {
+      if (!result.ok && result.needs_password) {
+        openPasswordPrompt(conn.name, result.error || 'password required');
+        return;
+      }
+      showMessage(result.ok ? ('test ok: ' + (result.platform || 'unknown platform') + (result.server_running ? ', server running' : '')) : ('test failed: ' + (result.error || 'unknown error')), result.ok ? 'ok' : 'error');
+    }).catch(function (error) {
+      if (error.code === SSH_HOST_KEY_CHANGED) {
+        openHostKeyPrompt(conn.name, error.details, 'test');
+        return;
+      }
+      if (error.code === SSH_AUTH_REQUIRED) {
+        openPasswordPrompt(conn.name, error.message);
+        return;
+      }
+      throw error;
+    });
+  }
+
+  function connectConnection(conn) {
+    return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/connect', { method: 'POST', body: {} }).then(function () {
+      showMessage('connected: ' + conn.name, 'ok');
+    }).catch(function (error) {
+      if (error.code === SSH_HOST_KEY_CHANGED) {
+        openHostKeyPrompt(conn.name, error.details, 'connect');
+        return;
+      }
+      if (error.code === SSH_AUTH_REQUIRED) {
+        openPasswordPrompt(conn.name, error.message);
+        return;
+      }
+      throw error;
+    });
   }
 
   function actionButton(label, onClick, primary) {
@@ -633,6 +770,13 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
         needsBadge.textContent = 'needs password';
         stateTd.appendChild(needsBadge);
       }
+      if (hostKeyPrompts[conn.name] !== undefined) {
+        stateTd.appendChild(document.createTextNode(' '));
+        var hostKeyBadge = document.createElement('span');
+        hostKeyBadge.className = 'state state-host-key';
+        hostKeyBadge.textContent = 'host key changed';
+        stateTd.appendChild(hostKeyBadge);
+      }
       tr.appendChild(stateTd);
       var detailTd = document.createElement('td');
       detailTd.textContent = detailText(conn);
@@ -642,30 +786,10 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       var actions = document.createElement('div');
       actions.className = 'row-actions';
       actions.appendChild(actionButton('Test', function () {
-        return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/test', { method: 'POST', body: {} }).then(function (result) {
-          if (!result.ok && result.needs_password) {
-            openPasswordPrompt(conn.name, result.error || 'password required');
-            return;
-          }
-          showMessage(result.ok ? ('test ok: ' + (result.platform || 'unknown platform') + (result.server_running ? ', server running' : '')) : ('test failed: ' + (result.error || 'unknown error')), result.ok ? 'ok' : 'error');
-        }).catch(function (error) {
-          if (error.code === SSH_AUTH_REQUIRED) {
-            openPasswordPrompt(conn.name, error.message);
-            return;
-          }
-          throw error;
-        });
+        return testConnection(conn);
       }));
       actions.appendChild(actionButton('Connect', function () {
-        return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/connect', { method: 'POST', body: {} }).then(function () {
-          showMessage('connected: ' + conn.name, 'ok');
-        }).catch(function (error) {
-          if (error.code === SSH_AUTH_REQUIRED) {
-            openPasswordPrompt(conn.name, error.message);
-            return;
-          }
-          throw error;
-        });
+        return connectConnection(conn);
       }));
       actions.appendChild(actionButton('Disconnect', function () {
         return api('/api/v1/ssh/connections/' + encodeURIComponent(conn.name) + '/disconnect', { method: 'POST', body: {} }).then(function () {
@@ -702,6 +826,9 @@ form.password-form .form-error { flex-basis: 100%; margin: 0; font-size: 12px; c
       }
       if (passwordPrompts[conn.name] !== undefined) {
         rows.appendChild(passwordPromptRow(conn, passwordPrompts[conn.name]));
+      }
+      if (hostKeyPrompts[conn.name] !== undefined) {
+        rows.appendChild(hostKeyPromptRow(conn, hostKeyPrompts[conn.name]));
       }
     });
     var names = connections.map(function (conn) { return conn.name; });
