@@ -13,6 +13,8 @@ import type {
   SshAuthOptions,
   SshConnectionInfo,
   SshConnectionSpec,
+  SshHostKeyDetails,
+  SshHostKeyScan,
   SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 
@@ -21,37 +23,6 @@ export const SSH_AUTH_REQUIRED_CODE = 40130;
 
 /** Server error code meaning "the remote's host key changed" (SSH_HOST_KEY_CHANGED). */
 export const SSH_HOST_KEY_CHANGED_CODE = 40931;
-
-/**
- * A host key reported by `ssh-keyscan` on the remote, and the scan result
- * wrapping it. Structurally identical to `ScannedHostKey`/`SshHostKeyScan`
- * from `@moonshot-ai/ssh-remote`; declared here so the CLI compiles against
- * the manager both before and after those types land.
- */
-export interface SshScannedHostKey {
-  keyType: string;
-  /** SHA256 fingerprint in the `SHA256:…` form `ssh-keygen -l` prints. */
-  fingerprint: string;
-}
-
-export interface SshHostKeyScan {
-  host: string;
-  port: number;
-  keys: SshScannedHostKey[];
-}
-
-/**
- * Mirror of the manager's `SshHostKeyDetails` (host-key contract): the
- * comparison data attached to a host-key-changed failure — the presented
- * fingerprint, the stored one, and the offending known_hosts location.
- */
-export interface SshHostKeyDetailsShape {
-  fingerprint?: string;
-  keyType?: string;
-  expectedFingerprint?: string;
-  knownHostsFile?: string;
-  knownHostsLine?: number;
-}
 
 /**
  * The operation surface `kimi ssh` needs; the local manager satisfies it
@@ -201,7 +172,7 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
         `/${encodeURIComponent(name)}/test`,
         authBody(auth),
       );
-      const result: SshTestResult & { hostKey?: SshHostKeyDetailsShape } = {
+      return {
         ok: data.ok,
         platform: data.platform as RemotePlatform | undefined,
         kimiPath: data.kimi_path,
@@ -210,7 +181,6 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
         needsPassword: data.needs_password,
         hostKey: fromWireHostKeyDetails(data.host_key),
       };
-      return result;
     },
     async connect(name, auth) {
       const data = await call<{ local_origin: string }>(
@@ -256,6 +226,8 @@ interface SshTestWire {
 }
 
 interface WireHostKeyDetails {
+  host: string;
+  port: number;
   fingerprint?: string;
   key_type?: string;
   expected_fingerprint?: string;
@@ -265,9 +237,11 @@ interface WireHostKeyDetails {
 
 function fromWireHostKeyDetails(
   wire: WireHostKeyDetails | undefined,
-): SshHostKeyDetailsShape | undefined {
+): SshHostKeyDetails | undefined {
   if (wire === undefined) return undefined;
   return {
+    host: wire.host,
+    port: wire.port,
     fingerprint: wire.fingerprint,
     keyType: wire.key_type,
     expectedFingerprint: wire.expected_fingerprint,

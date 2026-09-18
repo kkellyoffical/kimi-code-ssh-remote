@@ -125,15 +125,6 @@ function localManager(deps: SshCommandDeps): SshConnectionManager {
   return deps.createLocalManager?.() ?? createSshConnectionManager({ homeDir: deps.homeDir });
 }
 
-/**
- * The manager satisfies `SshBackend` natively once the ssh-remote host-key
- * contract (`scanHostKey`/`forgetHostKey`, merged ahead of this branch) is
- * in; the cast bridges this branch's build against the pre-contract package.
- */
-function localManagerBackend(deps: SshCommandDeps): SshBackend {
-  return localManager(deps) as unknown as SshBackend;
-}
-
 /** Pick the REST backend when a server is live, else the local manager. */
 async function resolveBackend(deps: SshCommandDeps): Promise<{
   backend: SshBackend;
@@ -143,7 +134,7 @@ async function resolveBackend(deps: SshCommandDeps): Promise<{
   if (server !== undefined) {
     return { backend: restBackend(deps, server), server };
   }
-  return { backend: localManagerBackend(deps), server: undefined };
+  return { backend: localManager(deps), server: undefined };
 }
 
 /** Where saved passwords live; printed so users can judge the risk. */
@@ -664,12 +655,11 @@ async function connectViaServer(
 /** Direct mode: hold the tunnel in this process until Ctrl+C. */
 async function connectDirect(options: SshConnectOptions, deps: SshCommandDeps): Promise<void> {
   const manager = localManager(deps);
-  const backend = manager as unknown as SshBackend;
-  const handle = await connectWithAuth(backend, options, deps);
+  const handle = await connectWithAuth(manager, options, deps);
   if (handle.remoteToken === undefined) {
     throw new Error('ssh tunnel connected without a remote token');
   }
-  const info = await findConnection(backend, options.name);
+  const info = await findConnection(manager, options.name);
   const remoteUrl = buildSshDirectUrl(handle.localOrigin, handle.remoteToken);
   deps.stdout.write(
     `${formatConnectDirectBanner({

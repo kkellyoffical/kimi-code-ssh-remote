@@ -1,19 +1,19 @@
 /**
  * Host-key helpers for `kimi ssh`: detecting the host-key-changed failure
  * across the local manager and the REST backend, and normalizing the two
- * fingerprints the user must compare — the stored one (already recovered
- * from the offending known_hosts line by the backend) and the one the
- * remote presents now.
+ * fingerprints the user must compare — the stored one (recovered from the
+ * offending known_hosts line by the backend) and the one the remote presents
+ * now.
  */
 
-import { SshRemoteError } from '@moonshot-ai/ssh-remote';
-
 import {
-  SSH_HOST_KEY_CHANGED_CODE,
-  SshApiError,
-  type SshHostKeyDetailsShape,
+  SshRemoteError,
+  type SshHostKeyDetails,
   type SshHostKeyScan,
-} from './client';
+  type SshTestResult,
+} from '@moonshot-ai/ssh-remote';
+
+import { SSH_HOST_KEY_CHANGED_CODE, SshApiError } from './client';
 
 /** One host key reduced to what the user compares: algorithm + fingerprint. */
 export interface HostKeyFingerprint {
@@ -36,10 +36,7 @@ export interface HostKeyChangedDetails {
 /** Unified host-key-changed detection across the REST and local backends. */
 export function isHostKeyChangedError(error: unknown): boolean {
   if (error instanceof SshApiError) return error.code === SSH_HOST_KEY_CHANGED_CODE;
-  return (
-    error instanceof SshRemoteError &&
-    (error.kind as string) === 'host-key-changed'
-  );
+  return error instanceof SshRemoteError && error.kind === 'host-key-changed';
 }
 
 /** Wire shape of the 40931 envelope `details` (all fields best-effort). */
@@ -72,8 +69,7 @@ export function extractHostKeyChangedDetails(error: unknown): HostKeyChangedDeta
     };
   }
   if (error instanceof SshRemoteError) {
-    const hostKey = (error as SshRemoteError & { hostKey?: SshHostKeyDetailsShape }).hostKey;
-    return hostKey === undefined ? {} : detailsFromHostKey(hostKey);
+    return error.hostKey === undefined ? {} : detailsFromHostKey(error.hostKey);
   }
   return {};
 }
@@ -83,15 +79,14 @@ export function extractHostKeyChangedDetails(error: unknown): HostKeyChangedDeta
  * throwing, so the host-key-changed case arrives as `{ ok: false, hostKey }`.
  * Returns undefined for every other failure kind.
  */
-export function hostKeyChangedFromTestResult(result: {
-  ok: boolean;
-  hostKey?: SshHostKeyDetailsShape;
-}): HostKeyChangedDetails | undefined {
+export function hostKeyChangedFromTestResult(
+  result: SshTestResult,
+): HostKeyChangedDetails | undefined {
   if (result.ok || result.hostKey === undefined) return undefined;
   return detailsFromHostKey(result.hostKey);
 }
 
-function detailsFromHostKey(hostKey: SshHostKeyDetailsShape): HostKeyChangedDetails {
+function detailsFromHostKey(hostKey: SshHostKeyDetails): HostKeyChangedDetails {
   return {
     presented:
       hostKey.fingerprint === undefined

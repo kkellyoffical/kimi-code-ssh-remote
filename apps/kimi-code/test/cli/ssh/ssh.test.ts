@@ -22,7 +22,6 @@ import {
   type SshConnectionHandle,
   type SshConnectionInfo,
   type SshConnectionManager,
-  type SshErrorKind,
   type SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 import chalk from 'chalk';
@@ -896,7 +895,7 @@ describe('kimi ssh connect', () => {
       close: async () => {
         closed = true;
       },
-    } as SshConnectionManager;
+    } satisfies SshConnectionManager;
     const { deps, io, opened } = makeDeps({
       createLocalManager: () => manager,
       holdForeground: async (onShutdown) => {
@@ -934,7 +933,7 @@ describe('kimi ssh connect', () => {
       forgetHostKey: async () => {},
       status: () => ({ state: 'off' as const }),
       close: async () => {},
-    } as SshConnectionManager;
+    } satisfies SshConnectionManager;
     const { deps } = makeDeps({
       getLiveServer: async () => LIVE_SERVER,
       createRestClient: () => {
@@ -979,12 +978,10 @@ describe('host-key-changed handling', () => {
   };
 
   function hostKeyChangedError(): SshRemoteError {
-    const error = new SshRemoteError(
-      'host-key-changed' as SshErrorKind,
-      'Host key verification failed.',
-      { stderr: SSH_CHANGED_STDERR },
-    );
-    return Object.assign(error, { hostKey: HOST_KEY });
+    return new SshRemoteError('host-key-changed', 'Host key verification failed.', {
+      stderr: SSH_CHANGED_STDERR,
+      hostKey: HOST_KEY,
+    });
   }
 
   it('test: warns with the fingerprint comparison, forgets on confirm, and retries', async () => {
@@ -1026,7 +1023,7 @@ describe('host-key-changed handling', () => {
       test: async () => {
         attempts += 1;
         if (attempts === 1) {
-          return { ok: false, error: 'Host key verification failed.', hostKey: HOST_KEY } as SshTestResult;
+          return { ok: false, error: 'Host key verification failed.', hostKey: HOST_KEY };
         }
         return { ok: true, platform: 'linux-x64' };
       },
@@ -1151,7 +1148,7 @@ describe('host-key-changed handling', () => {
       },
       status: () => ({ state: 'on' as const, localOrigin: 'http://127.0.0.1:49001' }),
       close: async () => {},
-    } as SshConnectionManager;
+    } satisfies SshConnectionManager;
     const { deps, io } = makeDeps({
       createLocalManager: () => manager,
       isInteractive: () => true,
@@ -1240,10 +1237,7 @@ describe('host-key helpers', () => {
   };
 
   it('detects host-key-changed across the local and REST backends', () => {
-    const local = Object.assign(
-      new SshRemoteError('host-key-changed' as SshErrorKind, 'changed'),
-      { hostKey: HOST_KEY },
-    );
+    const local = new SshRemoteError('host-key-changed', 'changed', { hostKey: HOST_KEY });
     expect(isHostKeyChangedError(local)).toBe(true);
     expect(isHostKeyChangedError(new SshApiError(SSH_HOST_KEY_CHANGED_CODE, 'changed'))).toBe(true);
     expect(isHostKeyChangedError(new SshRemoteError('auth', 'denied'))).toBe(false);
@@ -1270,17 +1264,14 @@ describe('host-key helpers', () => {
   });
 
   it('extracts the comparison details from a local error hostKey payload', () => {
-    const local = Object.assign(
-      new SshRemoteError('host-key-changed' as SshErrorKind, 'changed'),
-      { hostKey: HOST_KEY },
-    );
+    const local = new SshRemoteError('host-key-changed', 'changed', { hostKey: HOST_KEY });
     expect(extractHostKeyChangedDetails(local)).toEqual({
       presented: { keyType: 'ssh-ed25519', fingerprint: 'SHA256:New' },
       storedFingerprint: 'SHA256:Old',
       offending: { file: '/home/user/.ssh/known_hosts', line: 12 },
     });
     expect(
-      extractHostKeyChangedDetails(new SshRemoteError('host-key-changed' as SshErrorKind, 'changed')),
+      extractHostKeyChangedDetails(new SshRemoteError('host-key-changed', 'changed')),
     ).toEqual({});
   });
 
@@ -1708,6 +1699,8 @@ describe('ssh REST client', () => {
             ok: false,
             error: 'Host key verification failed.',
             host_key: {
+              host: 'example.com',
+              port: 22,
               fingerprint: 'SHA256:New',
               key_type: 'ssh-ed25519',
               expected_fingerprint: 'SHA256:Old',
@@ -1720,7 +1713,9 @@ describe('ssh REST client', () => {
     });
     const result = await client.test('prod');
     expect(result.ok).toBe(false);
-    expect((result as SshTestResult & { hostKey?: unknown }).hostKey).toEqual({
+    expect(result.hostKey).toEqual({
+      host: 'example.com',
+      port: 22,
       fingerprint: 'SHA256:New',
       keyType: 'ssh-ed25519',
       expectedFingerprint: 'SHA256:Old',
@@ -1829,5 +1824,42 @@ describe('local registry integration (temp home, no server)', () => {
       readFileSync(join(homeDir, 'ssh', 'secrets.json'), 'utf8'),
     ) as { passwords: Record<string, string> };
     expect(cleared.passwords['prod']).toBeUndefined();
+  });
+
+  it('host-key scan/forget round-trip through the real local manager', async () => {
+    const removedTargets: string[] = [];
+    const runner: ProcessRunner = {
+      run: async (argv) => {
+        if (argv[0] === 'ssh-keyscan') {
+          return {
+            code: 0,
+            stdout:
+              'example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ7Yq+xMZ+0k0k0k0k0k0k0k0k0k0k0k0k0k0k0k0k0x\n',
+            stderr: '',
+          };
+        }
+        if (argv[0] === 'ssh-keygen') {
+          removedTargets.push(argv[2] ?? '');
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        return { code: 255, stdout: '', stderr: 'Permission denied (publickey).' };
+      },
+      spawn: () => {
+        throw new Error('unexpected spawn');
+      },
+    };
+    const io = makeIo();
+    const deps = {
+      ...makeLocalDeps(io),
+      createLocalManager: () => createSshConnectionManager({ homeDir, runner }),
+    };
+    await handleSshAdd({ name: 'prod', target: 'example.com' }, deps);
+    await handleSshHostKey({ name: 'prod' }, deps);
+    const out = io.readStdout();
+    expect(out).toContain('ssh-ed25519');
+    expect(out).toContain('SHA256:J8jFK3DyrmnwzAe9O2AbJDJmuwEimCKoRkyR4G1GdOU');
+    await handleSshHostKey({ name: 'prod', forget: true }, deps);
+    expect(removedTargets).toEqual(['example.com']);
+    expect(io.readStdout()).toContain('Removed the stored host key for ssh connection "prod"');
   });
 });
