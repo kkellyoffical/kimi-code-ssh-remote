@@ -135,6 +135,17 @@ export function fakeSshConnectionManager(
       const entry = requireEntry(name);
       entry.password = undefined;
     },
+    async scanHostKey(name: string) {
+      const entry = requireEntry(name);
+      return {
+        host: entry.spec.host,
+        port: entry.spec.port,
+        keys: [],
+      };
+    },
+    async forgetHostKey(name: string) {
+      requireEntry(name);
+    },
     async test(name: string, options?: SshAuthOptions): Promise<SshTestResult> {
       const entry = requireEntry(name);
       if (entry.authRequired && passwordFor(entry, options) === undefined) {

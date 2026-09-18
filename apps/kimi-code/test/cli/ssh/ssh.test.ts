@@ -821,12 +821,12 @@ describe('kimi ssh connect', () => {
       disconnect: async () => {},
       setPassword: async () => {},
       clearPassword: async () => {},
+      scanHostKey: async () => ({ host: 'example.com', port: 22, keys: [] }),
+      forgetHostKey: async () => {},
       status: () => ({ state: 'on' as const, localOrigin: handle.localOrigin }),
       close: async () => {
         closed = true;
       },
-      setPassword: async () => {},
-      clearPassword: async () => {},
     } satisfies SshConnectionManager;
     const { deps, io, opened } = makeDeps({
       createLocalManager: () => manager,
@@ -861,10 +861,10 @@ describe('kimi ssh connect', () => {
       disconnect: async () => {},
       setPassword: async () => {},
       clearPassword: async () => {},
+      scanHostKey: async () => ({ host: 'example.com', port: 22, keys: [] }),
+      forgetHostKey: async () => {},
       status: () => ({ state: 'off' as const }),
       close: async () => {},
-      setPassword: async () => {},
-      clearPassword: async () => {},
     } satisfies SshConnectionManager;
     const { deps } = makeDeps({
       getLiveServer: async () => LIVE_SERVER,
