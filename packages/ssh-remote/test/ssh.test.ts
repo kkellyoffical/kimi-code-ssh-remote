@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SshRemoteError, isNeedsPasswordError } from '../src/errors';
 import type { SshConnectionProfile } from '../src/profile';
 import type { RunResult } from '../src/runner';
-import { SshClient, classifySshError, shQuote } from '../src/ssh';
+import { SshClient, classifySshError, parseOffendingHostKey, shQuote } from '../src/ssh';
 
 import { FakeProcessRunner } from './fake-runner';
 
@@ -53,6 +53,7 @@ describe('SshClient', () => {
     expect(joined).toContain(`ControlPath=${client.controlPath}`);
     expect(joined).toContain('ControlPersist=');
     expect(joined).toContain('BatchMode=yes');
+    expect(joined).toContain('StrictHostKeyChecking=accept-new');
     expect(joined).toContain('ConnectTimeout=');
     expect(argv).toContain('-p');
     expect(argv[argv.indexOf('-p') + 1]).toBe('2222');
@@ -70,6 +71,24 @@ describe('SshClient', () => {
     const { argv } = runner.lastRun();
     expect(argv).not.toContain('-i');
     expect(argv.at(-2)).toBe('plain.example.com');
+  });
+
+  it('uses strict host key checking when the profile opts in', async () => {
+    const runner = new FakeProcessRunner();
+    const client = makeClient(runner, { ...PROFILE, strictHostKeyChecking: true });
+    await client.connect();
+    const joined = runner.lastRun().argv.join(' ');
+    expect(joined).toContain('StrictHostKeyChecking=yes');
+    expect(joined).not.toContain('StrictHostKeyChecking=accept-new');
+  });
+
+  it('injects accept-new into scp argv', async () => {
+    const runner = new FakeProcessRunner();
+    const client = makeClient(runner);
+    await client.upload('/tmp/kimi-linux-x64', '/home/alice/bin/kimi');
+    const joined = runner.lastRun().argv.join(' ');
+    expect(runner.lastRun().argv[0]).toBe('scp');
+    expect(joined).toContain('StrictHostKeyChecking=accept-new');
   });
 
   it('classifies a permission-denied failure as an auth error', async () => {
@@ -246,9 +265,72 @@ describe('SshClient password authentication', () => {
   });
 });
 
+describe('SshClient host key verification', () => {
+  const CHANGED_KEY: RunResult = {
+    code: 255,
+    stdout: '',
+    stderr: [
+      '@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @',
+      'IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!',
+      'The fingerprint for the ED25519 key sent by the remote host is',
+      'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+      'Offending ED25519 key in /home/alice/.ssh/known_hosts:17',
+      'Host key for dev.example.com has changed and you have requested strict checking.',
+      'Host key verification failed.',
+    ].join('\n'),
+  };
+
+  it('classifies a changed host key with guidance and the offending key location', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = CHANGED_KEY;
+    const client = makeClient(runner);
+    const error: unknown = await client.connect().catch((error) => error);
+    expect(error).toBeInstanceOf(SshRemoteError);
+    const sshError = error as SshRemoteError;
+    expect(sshError.kind).toBe('host-key-changed');
+    expect(sshError.offendingHostKey).toEqual({
+      file: '/home/alice/.ssh/known_hosts',
+      line: 17,
+    });
+    expect(sshError.message).toContain('ssh-keygen -R [dev.example.com]:2222');
+    expect(sshError.message).toContain('/home/alice/.ssh/known_hosts:17');
+    expect(sshError.needsPassword).toBe(false);
+  });
+
+  it('never retries a changed host key through askpass, even with a password', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = CHANGED_KEY;
+    const client = makeClient(runner, PROFILE, 's3cret');
+    const error: unknown = await client.connect().catch((error) => error);
+    expect((error as SshRemoteError).kind).toBe('host-key-changed');
+    expect(runner.runs).toHaveLength(1);
+  });
+});
+
+describe('parseOffendingHostKey', () => {
+  it('extracts the known_hosts file and line from ssh stderr', () => {
+    expect(
+      parseOffendingHostKey('Offending RSA key in /home/alice/.ssh/known_hosts:3\nHost key verification failed.'),
+    ).toEqual({ file: '/home/alice/.ssh/known_hosts', line: 3 });
+  });
+
+  it('returns undefined when no offending key is reported', () => {
+    expect(parseOffendingHostKey('Host key verification failed.')).toBeUndefined();
+  });
+});
+
 describe('classifySshError', () => {
   const cases: Array<[string, { code: number; stderr: string }, string]> = [
     ['auth', { code: 255, stderr: 'Permission denied (publickey,password).' }, 'auth'],
+    [
+      'host key changed',
+      {
+        code: 255,
+        stderr:
+          'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.',
+      },
+      'host-key-changed',
+    ],
     [
       'too many authentication failures',
       {
