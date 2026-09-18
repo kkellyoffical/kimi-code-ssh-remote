@@ -8,7 +8,8 @@ import chalk from 'chalk';
 
 import { darkColors } from '#/tui/theme/colors';
 
-import { SshApiError } from './client';
+import { SSH_HOST_KEY_CHANGED_CODE, SshApiError } from './client';
+import type { HostKeyFingerprint, OffendingHostKey } from './host-key';
 
 const primary = (text: string): string => chalk.hex(darkColors.primary)(text);
 const url = (text: string): string => chalk.hex(darkColors.accent)(text);
@@ -166,6 +167,80 @@ export function formatNeedsPasswordError(name: string, command: 'connect' | 'tes
   ].join('\n');
 }
 
+/**
+ * The host-key-changed warning: the stored fingerprint (from the offending
+ * known_hosts line) against the one the remote presents now, so the user can
+ * judge whether the change is expected before any key is removed.
+ */
+export function formatHostKeyChangedWarning(options: {
+  name: string;
+  target: string;
+  presented?: HostKeyFingerprint;
+  storedFingerprint?: string;
+  offending?: OffendingHostKey;
+}): string {
+  const lines = [
+    `${bad('WARNING:')} the host key for ${strong(options.name)} ${dim(`(${options.target})`)} has changed!`,
+  ];
+  if (options.storedFingerprint !== undefined) {
+    const where =
+      options.offending === undefined
+        ? ''
+        : `  ${dim(`(${options.offending.file}:${options.offending.line})`)}`;
+    lines.push(`  Stored fingerprint:     ${options.storedFingerprint}${where}`);
+  } else if (options.offending !== undefined) {
+    lines.push(`  Stored key:             ${options.offending.file}:${options.offending.line}`);
+  }
+  if (options.presented !== undefined) {
+    lines.push(
+      `  Presented fingerprint:  ${options.presented.fingerprint}  ${dim(`(${options.presented.keyType})`)}`,
+    );
+  }
+  lines.push(
+    '',
+    'This could be a man-in-the-middle attack — or the host key changed legitimately (OS reinstall, key rotation, a different machine now answering for this address). Do not continue unless you expected the change.',
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Non-interactive host-key-changed failure: name the two ways to remove the
+ * stale key — the CLI command or the manual ssh-keygen equivalent.
+ */
+export function formatHostKeyChangedAction(name: string, removeTarget: string): string {
+  return [
+    'Remove the stored key, then retry:',
+    `  kimi ssh host-key ${name} --forget`,
+    'Or remove it manually:',
+    `  ssh-keygen -R ${removeTarget}`,
+  ].join('\n');
+}
+
+/** `kimi ssh host-key <name>`: every key the remote currently presents. */
+export function formatScannedHostKeys(
+  name: string,
+  target: string,
+  keys: readonly HostKeyFingerprint[],
+): string {
+  const width = Math.max(...keys.map((key) => key.keyType.length));
+  return [
+    `Host key for ${strong(name)} ${dim(`(${target})`)}:`,
+    ...keys.map((key) => `  ${key.keyType.padEnd(width)}  ${key.fingerprint}`),
+    '',
+    dim(
+      'Connections trust the key presented on first contact (StrictHostKeyChecking=accept-new) and fail if it changes later.',
+    ),
+  ].join('\n');
+}
+
+/** `kimi ssh host-key <name> --forget` confirmation. */
+export function formatHostKeyForgotten(name: string, target: string): string {
+  return [
+    `Removed the stored host key for ssh connection "${name}" (${target}).`,
+    `The next connection will trust the key the host presents — verify it first with \`kimi ssh host-key ${name}\`.`,
+  ].join('\n');
+}
+
 /** The status line `kimi ssh add` prints for its post-save probe. */
 export function formatAddAuthLine(result: {
   name: string;
@@ -191,6 +266,9 @@ export function formatAddAuthLine(result: {
  */
 export function sshErrorHint(error: unknown): string | undefined {
   if (error instanceof SshRemoteError) {
+    if (error.kind === 'host-key-changed') {
+      return 'The remote\'s host key changed. Compare it with `kimi ssh host-key <name>`, then remove the stale key with `kimi ssh host-key <name> --forget`.';
+    }
     if (error.kind === 'auth') {
       return 'Authentication failed. Check your keys with `ssh-add -l`, save the connection with an explicit key (`kimi ssh add <name> <[user@]host> --identity-file <path>`), or use a password (`kimi ssh passwd <name>`).';
     }
@@ -208,6 +286,9 @@ export function sshErrorHint(error: unknown): string | undefined {
     }
     if (error.code === 40930) {
       return 'A connection with this name already exists. Run `kimi ssh list` to see it, or `kimi ssh remove` it first.';
+    }
+    if (error.code === SSH_HOST_KEY_CHANGED_CODE) {
+      return 'The remote\'s host key changed. Compare it with `kimi ssh host-key <name>`, then remove the stale key with `kimi ssh host-key <name> --forget`.';
     }
     if (error.code === -1) {
       return 'The local server accepted no connection. If this keeps happening, stop it and run `kimi web` again.';

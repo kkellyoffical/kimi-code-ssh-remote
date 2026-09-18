@@ -206,6 +206,7 @@ kimi ssh list                          # 已保存的连接、认证方式及实
 kimi ssh passwd prod                   # 保存连接的密码（隐藏输入）
 kimi ssh test prod                     # 探测连通性与远端环境
 kimi ssh connect prod                  # 建立隧道并打开远端 web UI
+kimi ssh host-key prod                 # 显示远端当前的主机密钥指纹（--forget 删除已存储的密钥）
 kimi ssh remove prod                   # 删除已保存的连接
 ```
 
@@ -217,6 +218,7 @@ kimi ssh remove prod                   # 删除已保存的连接
 | `kimi ssh remove <name>` | 删除已保存的连接，若已连接则先断开 |
 | `kimi ssh test <name>` | 发起 SSH 握手，报告远端平台、kimi 安装状态与服务状态；`--password` 先提示输入密码 |
 | `kimi ssh connect <name>` | 建立隧道并打印远端 web UI 地址；`--password` 先提示输入密码 |
+| `kimi ssh host-key <name>` | 扫描并显示远端当前提供的主机密钥指纹；`--forget` 删除已存储的密钥，使下次连接重新信任 |
 
 `connect` 有两种模式。默认模式（本地服务正在运行）下由本地服务持有隧道，命令会打印两个 URL：远端 web UI（本地 web UI 通过 `?kimi_origin=` 查询参数指向远端）和服务器内置的 `/ssh` 管理页。没有运行中的服务时（或使用 `--direct`），隧道由当前终端持有，按 `Ctrl+C` 断开，打印的 URL 指向隧道端口上远端自己的 web UI。`--no-open` 表示不自动打开浏览器。
 
@@ -233,6 +235,14 @@ kimi ssh remove prod                   # 删除已保存的连接
 ::: warning 注意
 已保存的密码以明文存放在 `~/.kimi-code/ssh/secrets.json`（文件权限 `0600`）。任何能读到该文件的人都能读到密码，因此在多人共用的机器上请优先使用密钥认证；保存密码永远是显式选择，不会自动发生。
 :::
+
+#### 主机密钥验证
+
+`kimi ssh` 通过 SSH 主机密钥验证远端身份，与系统 `ssh` 共用同一个 `known_hosts` 文件。首次连接某台主机时，会自动信任其提供的密钥并记录下来（`StrictHostKeyChecking=accept-new`）；此后的每次连接都要求远端提供同一把密钥。
+
+当远端提供的密钥与已存储的不一致时，`kimi ssh test` 和 `kimi ssh connect` 会拒绝继续，并打印两组指纹——已存储的指纹和远端当前提供的指纹。密钥变更可能意味着中间人攻击（man-in-the-middle attack），但也可能是正当变化：远端重装系统、轮换密钥，或该地址改由另一台机器响应。继续之前，请先将打印的指纹与远端的真实密钥比对确认。
+
+要查看远端当前提供的密钥，运行 `kimi ssh host-key prod`。确认变更符合预期后，用 `kimi ssh host-key prod --forget` 删除旧密钥，下次连接会再次按 accept-new 策略信任新密钥。在交互式终端中，`test` 和 `connect` 打印指纹对比后会询问是否删除旧密钥并重试；非交互环境则直接报错并给出同样的处理指引。等效的手动命令是 `ssh-keygen -R <host>`（非默认端口时使用 `ssh-keygen -R '[host]:port'`）。
 
 ### `kimi install-desktop`
 

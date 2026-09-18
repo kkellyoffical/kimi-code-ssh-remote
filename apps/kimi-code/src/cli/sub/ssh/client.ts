@@ -13,11 +13,16 @@ import type {
   SshAuthOptions,
   SshConnectionInfo,
   SshConnectionSpec,
+  SshHostKeyDetails,
+  SshHostKeyScan,
   SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 
 /** Server error code meaning "authentication needs a password" (SSH_AUTH_REQUIRED). */
 export const SSH_AUTH_REQUIRED_CODE = 40130;
+
+/** Server error code meaning "the remote's host key changed" (SSH_HOST_KEY_CHANGED). */
+export const SSH_HOST_KEY_CHANGED_CODE = 40931;
 
 /**
  * The operation surface `kimi ssh` needs; the local manager satisfies it
@@ -32,6 +37,8 @@ export interface SshBackend {
   connect(name: string, auth?: SshAuthOptions): Promise<{ localOrigin: string; remoteToken?: string }>;
   setPassword(name: string, password: string): Promise<void>;
   clearPassword(name: string): Promise<void>;
+  scanHostKey(name: string): Promise<SshHostKeyScan>;
+  forgetHostKey(name: string): Promise<void>;
 }
 
 /** Non-ok envelope from the server: carries the numeric error code for hints. */
@@ -39,6 +46,8 @@ export class SshApiError extends Error {
   constructor(
     readonly code: number,
     message: string,
+    /** Error-envelope `details` payload, when the server attaches them. */
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = 'SshApiError';
@@ -65,6 +74,7 @@ interface WireEnvelope<T> {
   code: number;
   msg: string;
   data: T | null;
+  details?: unknown;
 }
 
 function fromWire(wire: WireConnection): SshConnectionInfo {
@@ -129,7 +139,11 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
       );
     }
     if (!response.ok || envelope.code !== 0 || envelope.data === null) {
-      throw new SshApiError(envelope.code, envelope.msg || `request failed (HTTP ${response.status})`);
+      throw new SshApiError(
+        envelope.code,
+        envelope.msg || `request failed (HTTP ${response.status})`,
+        envelope.details,
+      );
     }
     return envelope.data;
   }
@@ -165,6 +179,7 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
         serverRunning: data.server_running,
         error: data.error,
         needsPassword: data.needs_password,
+        hostKey: fromWireHostKeyDetails(data.host_key),
       };
     },
     async connect(name, auth) {
@@ -183,6 +198,20 @@ export function createSshRestClient(options: SshRestClientOptions): SshBackend {
     async clearPassword(name) {
       await call<Record<string, never>>('DELETE', `/${encodeURIComponent(name)}/password`);
     },
+    async scanHostKey(name) {
+      const data = await call<WireHostKeyScan>(
+        'GET',
+        `/${encodeURIComponent(name)}/host-key/forget`,
+      );
+      return {
+        host: data.host,
+        port: data.port,
+        keys: data.keys.map((key) => ({ keyType: key.key_type, fingerprint: key.fingerprint })),
+      };
+    },
+    async forgetHostKey(name) {
+      await call<Record<string, never>>('POST', `/${encodeURIComponent(name)}/host-key/forget`);
+    },
   };
 }
 
@@ -193,4 +222,36 @@ interface SshTestWire {
   server_running?: boolean;
   error?: string;
   needs_password?: boolean;
+  host_key?: WireHostKeyDetails;
+}
+
+interface WireHostKeyDetails {
+  host: string;
+  port: number;
+  fingerprint?: string;
+  key_type?: string;
+  expected_fingerprint?: string;
+  known_hosts_file?: string;
+  known_hosts_line?: number;
+}
+
+function fromWireHostKeyDetails(
+  wire: WireHostKeyDetails | undefined,
+): SshHostKeyDetails | undefined {
+  if (wire === undefined) return undefined;
+  return {
+    host: wire.host,
+    port: wire.port,
+    fingerprint: wire.fingerprint,
+    keyType: wire.key_type,
+    expectedFingerprint: wire.expected_fingerprint,
+    knownHostsFile: wire.known_hosts_file,
+    knownHostsLine: wire.known_hosts_line,
+  };
+}
+
+interface WireHostKeyScan {
+  host: string;
+  port: number;
+  keys: { key_type: string; fingerprint: string }[];
 }

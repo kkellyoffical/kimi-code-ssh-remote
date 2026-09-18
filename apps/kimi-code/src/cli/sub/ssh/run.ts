@@ -16,6 +16,12 @@
  * and retries once, while a non-interactive run fails with an actionable
  * message.
  *
+ * Host keys are trusted on first contact (StrictHostKeyChecking=accept-new).
+ * A host-key-changed refusal from `test`/`connect` prints the
+ * stored-vs-presented fingerprint comparison; an interactive run offers to
+ * forget the stale key and retry, a non-interactive run fails naming
+ * `kimi ssh host-key <name> --forget` and the manual `ssh-keygen -R`.
+ *
  * Every collaborator behind `SshCommandDeps` is injectable so tests never
  * touch a real server, registry, or ssh binary.
  */
@@ -56,10 +62,23 @@ import {
   formatConnectDirectBanner,
   formatConnectProxyBanner,
   formatConnectionTable,
+  formatHostKeyChangedAction,
+  formatHostKeyChangedWarning,
+  formatHostKeyForgotten,
   formatNeedsPasswordError,
+  formatScannedHostKeys,
   SSH_LIST_EMPTY_HINT,
   sshTarget,
 } from './format';
+import {
+  extractHostKeyChangedDetails,
+  hostKeyChangedFromTestResult,
+  isHostKeyChangedError,
+  knownHostsRemoveTarget,
+  primaryScannedKey,
+  type HostKeyChangedDetails,
+  type HostKeyFingerprint,
+} from './host-key';
 import { readSecretLine } from './secret-prompt';
 
 export interface SshCommandDeps {
@@ -201,6 +220,108 @@ async function promptPasswordRetry(
     `ssh connection "${name}" requires a password — public key authentication failed.\n`,
   );
   return promptPasswordAuth(deps, label);
+}
+
+/**
+ * Run a `test`/`connect` attempt, resolving a host-key-changed refusal when
+ * one comes back: print the stored-vs-presented fingerprint comparison, then
+ * either (interactive) forget the stale key on confirmation and retry once —
+ * the retry re-trusts under accept-new — or (non-interactive) fail with the
+ * forget command and the manual `ssh-keygen -R` equivalent.
+ */
+async function withHostKeyRetry<T>(
+  deps: SshCommandDeps,
+  backend: SshBackend,
+  name: string,
+  label: string,
+  attempt: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await attempt();
+  } catch (error) {
+    if (!isHostKeyChangedError(error)) throw error;
+    await resolveHostKeyChanged(deps, backend, name, label, extractHostKeyChangedDetails(error));
+    return attempt();
+  }
+}
+
+/**
+ * The `test` counterpart of `withHostKeyRetry`: the local manager folds a
+ * host-key-changed failure into the result (`{ ok: false, hostKey }`) instead
+ * of throwing, and the REST backend may answer either way, so both the result
+ * and the throw path resolve here, with a single retry either way.
+ */
+async function runTestResolvingHostKey(
+  deps: SshCommandDeps,
+  backend: SshBackend,
+  name: string,
+  label: string,
+  auth: SshAuthOptions | undefined,
+): Promise<SshTestResult> {
+  let retried = false;
+  for (;;) {
+    try {
+      const result = await runTest(backend, name, auth);
+      const details = hostKeyChangedFromTestResult(result);
+      if (details === undefined || retried) return result;
+      retried = true;
+      await resolveHostKeyChanged(deps, backend, name, label, details);
+    } catch (error) {
+      if (!isHostKeyChangedError(error) || retried) throw error;
+      retried = true;
+      await resolveHostKeyChanged(deps, backend, name, label, extractHostKeyChangedDetails(error));
+    }
+  }
+}
+
+async function resolveHostKeyChanged(
+  deps: SshCommandDeps,
+  backend: SshBackend,
+  name: string,
+  label: string,
+  details: HostKeyChangedDetails,
+): Promise<void> {
+  const presented = details.presented ?? (await scanPresentedKey(backend, name));
+  const warning = formatHostKeyChangedWarning({
+    name,
+    target: label,
+    presented,
+    storedFingerprint: details.storedFingerprint,
+    offending: details.offending,
+  });
+  if (!deps.isInteractive()) {
+    throw new Error(`${warning}\n${await hostKeyChangedAction(backend, name, label)}`);
+  }
+  deps.stdout.write(`${warning}\n`);
+  const confirmed = await deps.confirm('Remove the old host key and retry?');
+  if (!confirmed) {
+    throw new Error('host key verification failed — the stored key was left unchanged');
+  }
+  await backend.forgetHostKey(name);
+  deps.stdout.write(`Removed the stored host key for "${name}" — retrying.\n`);
+}
+
+/** The presented fingerprint for the warning when the failure carried none. */
+async function scanPresentedKey(
+  backend: SshBackend,
+  name: string,
+): Promise<HostKeyFingerprint | undefined> {
+  try {
+    return primaryScannedKey(await backend.scanHostKey(name));
+  } catch {
+    return undefined;
+  }
+}
+
+async function hostKeyChangedAction(
+  backend: SshBackend,
+  name: string,
+  label: string,
+): Promise<string> {
+  const info = await findConnection(backend, name);
+  const removeTarget =
+    info === undefined ? label : knownHostsRemoveTarget(info.host, info.port ?? 22);
+  return formatHostKeyChangedAction(name, removeTarget);
 }
 
 export interface SshAddOptions {
@@ -380,6 +501,32 @@ export async function handleSshPasswd(
   );
 }
 
+export interface SshHostKeyOptions {
+  name: string;
+  /** Remove the stored host key instead of showing the current one. */
+  forget?: boolean;
+}
+
+export async function handleSshHostKey(
+  options: SshHostKeyOptions,
+  deps: SshCommandDeps = DEFAULT_SSH_DEPS,
+): Promise<void> {
+  const { backend } = await resolveBackend(deps);
+  const label = await targetLabel(backend, options.name);
+  if (options.forget === true) {
+    await backend.forgetHostKey(options.name);
+    deps.stdout.write(`${formatHostKeyForgotten(options.name, label)}\n`);
+    return;
+  }
+  const scan = await backend.scanHostKey(options.name);
+  if (scan.keys.length === 0) {
+    throw new Error(
+      `no host key found for ssh connection "${options.name}" — the host did not answer the scan`,
+    );
+  }
+  deps.stdout.write(`${formatScannedHostKeys(options.name, label, scan.keys)}\n`);
+}
+
 export interface SshTestOptions {
   name: string;
   /** Prompt (hidden echo) for a password before testing. */
@@ -393,10 +540,10 @@ export async function handleSshTest(
   const { backend } = await resolveBackend(deps);
   const label = await targetLabel(backend, options.name);
   const preAuth = options.password === true ? await promptPasswordFlag(deps, label) : undefined;
-  let result = await runTest(backend, options.name, preAuth);
+  let result = await runTestResolvingHostKey(deps, backend, options.name, label, preAuth);
   if (!result.ok && result.needsPassword === true && preAuth === undefined) {
     const retry = await promptPasswordRetry(deps, options.name, 'test', label);
-    result = await runTest(backend, options.name, retry);
+    result = await runTestResolvingHostKey(deps, backend, options.name, label, retry);
   }
   deps.stdout.write(formatTestResult(options.name, result));
   if (!result.ok) {
@@ -457,28 +604,27 @@ export async function handleSshConnect(
 
 /**
  * Connect with public-key auth first; on a needs-password failure prompt
- * (hidden echo) and retry once with the entered password.
+ * (hidden echo) and retry once with the entered password. A host-key-changed
+ * refusal is resolved inside `withHostKeyRetry` before auth is considered.
  */
 async function connectWithAuth(
   backend: SshBackend,
   options: SshConnectOptions,
   deps: SshCommandDeps,
 ): Promise<{ localOrigin: string; remoteToken?: string }> {
+  const label = await targetLabel(backend, options.name);
   const preAuth =
-    options.password === true
-      ? await promptPasswordFlag(deps, await targetLabel(backend, options.name))
-      : undefined;
+    options.password === true ? await promptPasswordFlag(deps, label) : undefined;
   try {
-    return await backend.connect(options.name, preAuth);
+    return await withHostKeyRetry(deps, backend, options.name, label, () =>
+      backend.connect(options.name, preAuth),
+    );
   } catch (error) {
     if (preAuth !== undefined || !errorNeedsPassword(error)) throw error;
-    const retry = await promptPasswordRetry(
-      deps,
-      options.name,
-      'connect',
-      await targetLabel(backend, options.name),
+    const retry = await promptPasswordRetry(deps, options.name, 'connect', label);
+    return withHostKeyRetry(deps, backend, options.name, label, () =>
+      backend.connect(options.name, retry),
     );
-    return backend.connect(options.name, retry);
   }
 }
 

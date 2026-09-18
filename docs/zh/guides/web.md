@@ -87,6 +87,8 @@ web UI 也可以驱动远程机器：CLI 维持一条到远端主机的 SSH 隧�
 
 连接时总是先尝试公钥认证（ssh-agent、默认密钥或 `--identity-file`）；如果远端要求密码，`connect` 会用隐藏输入提示输入密码，并询问是否记住。已保存密码的存储位置与其他认证方式见 [kimi ssh 命令参考](../reference/kimi-command.md#认证方式)。
 
+首次连接还会自动信任远端的主机密钥（`accept-new`），之后每次连接都会校验；如果密钥发生变化，`connect` 会中止并打印新旧指纹对比——审查与接受新密钥的流程见 [主机密钥验证](../reference/kimi-command.md#主机密钥验证)。
+
 `connect` 会打印并自动打开远端 web UI 的 URL。该 URL 加载本地 web UI，并通过 `?kimi_origin=` 查询参数指向隧道端点（`http://127.0.0.1:<port>/ssh/prod`），因此所有 API 请求都经 SSH 隧道转发；远端服务的 token 由本地服务在进程内注入，不会进入浏览器。首次连接一台新远端时，会自动在远端安装 Kimi Code CLI 并启动其服务。
 
 在终端中管理已保存的连接：`kimi ssh list` 显示各连接的认证方式及实时状态，`kimi ssh test prod` 检查连通性与远端环境，`kimi ssh passwd prod` 保存密码供后续使用，`kimi ssh remove prod` 删除连接。服务器还内置了管理页 `http://127.0.0.1:<port>/ssh`（追加启动横幅中的 `#token=...`），可在浏览器里添加、测试、连接和打开连接。没有运行中的本地服务时，可以用 `kimi ssh connect prod --direct` 由终端直接持有隧道，并打开远端自己的 web UI。完整命令说明见 [kimi ssh](../reference/kimi-command.md#kimi-ssh)。
