@@ -598,6 +598,8 @@ describe('server-v2 /api/v1/ssh/connections', () => {
     expect(body).toContain('添加连接');
     expect(body).toContain('连接列表');
     expect(body).toContain('message-close');
+    expect(body).toContain('id="message" class="hidden"');
+    expect(body).toContain('#message.hidden { display: none; }');
   });
 
   it('serves the management page with a content-type header only when a body is present', async () => {

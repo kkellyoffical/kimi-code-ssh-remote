@@ -51,6 +51,7 @@ main { max-width: 960px; margin: 0 auto; }
 .card h2 { font-size: 15px; font-weight: 600; margin: 0; }
 .card h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 20px 0 0; }
 #message { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; padding: 10px 14px; border-radius: 8px; border: 1px solid transparent; font-size: 13px; }
+#message.hidden { display: none; }
 #message.msg-error { background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger-fg); }
 #message.msg-ok { background: color-mix(in srgb, var(--success) 14%, transparent); border-color: color-mix(in srgb, var(--success) 35%, transparent); color: var(--success); }
 #message-text { flex: 1; white-space: pre-wrap; }
