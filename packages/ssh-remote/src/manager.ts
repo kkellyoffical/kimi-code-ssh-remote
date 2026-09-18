@@ -271,10 +271,16 @@ export function createSshConnectionManager(
       return waitForReconnect(name, existing).then((handle) => {
         if (handle !== undefined) return handle;
         const current = active.get(name);
-        if (current !== undefined && current !== existing) {
-          return connect(name, options);
+        if (current === existing) {
+          return startEstablish(name, options, existing);
         }
-        return startEstablish(name, options, existing);
+        if (current === undefined) {
+          throw new SshRemoteError(
+            'unknown',
+            `ssh connection "${name}" was disconnected while connecting`,
+          );
+        }
+        return connect(name, options);
       });
     }
     return startEstablish(name, options, existing);

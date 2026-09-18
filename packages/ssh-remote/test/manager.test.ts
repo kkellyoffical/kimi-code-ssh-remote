@@ -296,6 +296,58 @@ describe('SshConnectionManager', () => {
     await manager.close();
   });
 
+  it('rejects a reconnect-waiting connect when close() removes the entry', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    let releaseBackoff: (() => void) | undefined;
+    const gatedSleep = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        releaseBackoff = resolve;
+      });
+    };
+    const manager = makeManager(runner, 49160, gatedSleep);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox');
+    runner.spawns[0]?.resolveExit({ code: 255, signal: null });
+    await vi.waitFor(() => {
+      expect(manager.status('devbox').state).toBe('connecting');
+    });
+    const pending = manager.connect('devbox');
+    await manager.close();
+    await expect(pending).rejects.toThrow(/was disconnected while connecting/);
+    releaseBackoff?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runner.spawns).toHaveLength(1);
+    expect(exitRuns(runner)).toHaveLength(1);
+  });
+
+  it('rejects a reconnect-waiting connect after an explicit disconnect', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    let releaseBackoff: (() => void) | undefined;
+    const gatedSleep = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        releaseBackoff = resolve;
+      });
+    };
+    const manager = makeManager(runner, 49160, gatedSleep);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox');
+    runner.spawns[0]?.resolveExit({ code: 255, signal: null });
+    await vi.waitFor(() => {
+      expect(manager.status('devbox').state).toBe('connecting');
+    });
+    const pending = manager.connect('devbox');
+    await manager.disconnect('devbox');
+    await expect(pending).rejects.toThrow(/was disconnected while connecting/);
+    expect(manager.status('devbox')).toEqual({ state: 'off' });
+    releaseBackoff?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runner.spawns).toHaveLength(1);
+    expect(manager.status('devbox')).toEqual({ state: 'off' });
+    await manager.close();
+  });
+
   it('tests a connection read-only: handshake plus remote probe, no changes', async () => {
     const runner = new FakeProcessRunner();
     scriptHealthyRemote(runner);
