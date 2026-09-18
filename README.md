@@ -56,7 +56,7 @@ kimi ssh remove prod                   # 删除连接(已连接则先断开)
 
 1. **免密(agent / 默认密钥)**:把密钥加载进 ssh-agent,或 `add` 时加 `--identity-file`,无需其他配置。
 2. **密钥文件**:`kimi ssh add prod example.com --identity-file ~/.ssh/id_ed25519`。
-3. **密码(可选记住)**:`kimi ssh passwd prod` 保存后 `connect`/`test` 自动使用;或 `connect prod --password` 当次输入,验证通过后会询问是否记住。
+3. **密码(可选记住)**:`kimi ssh passwd prod` 保存后 `connect`/`test` 自动使用;或 `connect prod --password` 当次输入——输入密码后会询问是否记住,验证通过才会保存,失败不落盘。
 
 > 已保存的密码以**明文**存放在 `~/.kimi-code/ssh/secrets.json`(文件权限 `0600`)。保存密码永远是显式选择,不会自动发生;多人共用的机器上请优先使用密钥认证。
 
