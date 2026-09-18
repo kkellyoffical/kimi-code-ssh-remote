@@ -7,15 +7,20 @@ import {
   type SshConnectionManager,
   type SshConnectionSpec,
   type SshConnectionStatus,
+  type SshHostKeyDetails,
+  type SshHostKeyScan,
   type SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 
 export interface FakeSshConnectionManager extends SshConnectionManager {
   readonly connectCalls: string[];
   readonly connectOptions: (SshAuthOptions | undefined)[];
+  readonly forgottenHostKeys: string[];
   setHandle(name: string, handle: SshConnectionHandle | undefined): void;
   setConnectError(name: string, error: Error | undefined): void;
   setAuthRequired(name: string, required: boolean): void;
+  setHostKeyChanged(name: string, details: SshHostKeyDetails | undefined): void;
+  setHostKeyScan(name: string, scan: SshHostKeyScan | undefined): void;
   savedPassword(name: string): string | undefined;
 }
 
@@ -38,6 +43,24 @@ interface FakeEntry {
   authRequired: boolean;
   password?: string;
   needsPassword: boolean;
+  hostKeyChanged?: SshHostKeyDetails;
+  hostKeyScan?: SshHostKeyScan;
+}
+
+function hostKeyChangedError(details: SshHostKeyDetails): SshRemoteError {
+  return new SshRemoteError(
+    'host-key-changed',
+    `host key for ${details.host}:${details.port} has changed`,
+    { hostKey: details },
+  );
+}
+
+function defaultHostKeyScan(entry: FakeEntry): SshHostKeyScan {
+  return {
+    host: entry.spec.host,
+    port: entry.spec.port,
+    keys: [{ keyType: 'ssh-ed25519', fingerprint: 'SHA256:fake-scanned-host-key' }],
+  };
 }
 
 export function fakeSshConnectionManager(
@@ -46,11 +69,16 @@ export function fakeSshConnectionManager(
   const entries = new Map<string, FakeEntry>();
   const connectCalls: string[] = [];
   const connectOptions: (SshAuthOptions | undefined)[] = [];
+  const forgottenHostKeys: string[] = [];
 
   const statusOf = (name: string): SshConnectionStatus => {
     const entry = entries.get(name);
     if (entry === undefined || entry.state === 'off') {
-      return { state: 'off', needsPassword: entry?.needsPassword === true ? true : undefined };
+      return {
+        state: 'off',
+        needsPassword: entry?.needsPassword === true ? true : undefined,
+        hostKey: entry?.hostKeyChanged,
+      };
     }
     return {
       state: 'on',
@@ -83,6 +111,7 @@ export function fakeSshConnectionManager(
   return {
     connectCalls,
     connectOptions,
+    forgottenHostKeys,
     setHandle(name, handle) {
       const entry = requireEntry(name);
       entry.handle = handle;
@@ -94,6 +123,14 @@ export function fakeSshConnectionManager(
     setAuthRequired(name, required) {
       const entry = requireEntry(name);
       entry.authRequired = required;
+    },
+    setHostKeyChanged(name, details) {
+      const entry = requireEntry(name);
+      entry.hostKeyChanged = details;
+    },
+    setHostKeyScan(name, scan) {
+      const entry = requireEntry(name);
+      entry.hostKeyScan = scan;
     },
     savedPassword(name) {
       return entries.get(name)?.password;
@@ -135,19 +172,16 @@ export function fakeSshConnectionManager(
       const entry = requireEntry(name);
       entry.password = undefined;
     },
-    async scanHostKey(name: string) {
-      const entry = requireEntry(name);
-      return {
-        host: entry.spec.host,
-        port: entry.spec.port,
-        keys: [],
-      };
-    },
-    async forgetHostKey(name: string) {
-      requireEntry(name);
-    },
     async test(name: string, options?: SshAuthOptions): Promise<SshTestResult> {
       const entry = requireEntry(name);
+      if (entry.hostKeyChanged !== undefined) {
+        const details = entry.hostKeyChanged;
+        return {
+          ok: false,
+          error: `host key for ${details.host}:${details.port} has changed`,
+          hostKey: details,
+        };
+      }
       if (entry.authRequired && passwordFor(entry, options) === undefined) {
         return { ok: false, error: 'ssh authentication failed: permission denied', needsPassword: true };
       }
@@ -165,6 +199,7 @@ export function fakeSshConnectionManager(
       connectOptions.push(options);
       const entry = requireEntry(name);
       if (entry.connectError !== undefined) throw entry.connectError;
+      if (entry.hostKeyChanged !== undefined) throw hostKeyChangedError(entry.hostKeyChanged);
       if (entry.authRequired && passwordFor(entry, options) === undefined) {
         entry.needsPassword = true;
         throw new SshRemoteError('auth', 'ssh authentication failed: permission denied');
@@ -183,6 +218,15 @@ export function fakeSshConnectionManager(
       const entry = requireEntry(name);
       entry.state = 'off';
       entry.handle = undefined;
+    },
+    async scanHostKey(name: string): Promise<SshHostKeyScan> {
+      const entry = requireEntry(name);
+      return entry.hostKeyScan ?? defaultHostKeyScan(entry);
+    },
+    async forgetHostKey(name: string): Promise<void> {
+      const entry = requireEntry(name);
+      forgottenHostKeys.push(name);
+      entry.hostKeyChanged = undefined;
     },
     status: statusOf,
     async close() {

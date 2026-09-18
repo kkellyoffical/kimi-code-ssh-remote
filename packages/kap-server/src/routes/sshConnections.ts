@@ -3,6 +3,7 @@ import {
   type SshAuthOptions,
   type SshConnectionInfo,
   type SshConnectionManager,
+  type SshHostKeyDetails,
   type SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 
@@ -15,6 +16,7 @@ import {
   connectSshConnectionResponseSchema,
   deleteSshConnectionResponseSchema,
   disconnectSshConnectionResponseSchema,
+  forgetSshHostKeyResponseSchema,
   listSshConnectionsResponseSchema,
   setSshConnectionPasswordRequestSchema,
   sshConnectionAuthRequestSchema,
@@ -22,11 +24,15 @@ import {
   sshConnectionPasswordStateSchema,
   sshConnectionSchema,
   sshConnectionTestResultSchema,
+  sshHostKeyDetailsSchema,
+  sshHostKeyScanResponseSchema,
   submitSshConnectionPasswordRequestSchema,
   type ConnectSshConnectionResponse,
   type DisconnectSshConnectionResponse,
   type SshConnectionTestResultWire,
   type SshConnectionWire,
+  type SshHostKeyDetailsWire,
+  type SshHostKeyScanResponse,
 } from '../protocol/rest-ssh';
 
 interface SshConnectionsRouteHost {
@@ -72,6 +78,7 @@ export interface SshConnectionsRouteOptions {
 interface MappedSshError {
   readonly code: ErrorCode;
   readonly msg: string;
+  readonly details?: SshHostKeyDetailsWire;
 }
 
 export function registerSshConnectionsRoutes(
@@ -320,6 +327,7 @@ export function registerSshConnectionsRoutes(
         [ErrorCode.VALIDATION_FAILED]: {},
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
         [ErrorCode.SSH_AUTH_REQUIRED]: {},
+        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyDetailsSchema },
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Probe an SSH connection: handshake plus remote kap-server detection',
@@ -330,6 +338,18 @@ export function registerSshConnectionsRoutes(
       const body = authOptionsOf(req.body);
       try {
         const result = await opts.service.test(name, body);
+        if (!result.ok && result.hostKey !== undefined) {
+          reply.send(
+            errEnvelope(
+              ErrorCode.SSH_HOST_KEY_CHANGED,
+              result.error ?? `host key for connection "${name}" has changed`,
+              req.id,
+              undefined,
+              toHostKeyDetailsWire(result.hostKey),
+            ),
+          );
+          return;
+        }
         reply.send(okEnvelope(toTestWire(result), req.id));
       } catch (error) {
         sendSshError(reply, req, error);
@@ -354,6 +374,7 @@ export function registerSshConnectionsRoutes(
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
         [ErrorCode.SSH_AUTH_REQUIRED]: {},
         [ErrorCode.SSH_UNREACHABLE]: {},
+        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyDetailsSchema },
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Establish the SSH tunnel for a connection (idempotent)',
@@ -393,6 +414,7 @@ export function registerSshConnectionsRoutes(
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
         [ErrorCode.SSH_AUTH_REQUIRED]: {},
         [ErrorCode.SSH_UNREACHABLE]: {},
+        [ErrorCode.SSH_HOST_KEY_CHANGED]: { detailsSchema: sshHostKeyDetailsSchema },
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Submit an SSH password and connect, persisting it when save_password is true',
@@ -463,6 +485,72 @@ export function registerSshConnectionsRoutes(
     disconnectRoute.options,
     disconnectRoute.handler as Parameters<SshConnectionsRouteHost['post']>[2],
   );
+
+  const scanHostKeyRoute = defineRoute(
+    {
+      method: 'GET',
+      path: '/ssh/connections/{name}/host-key/forget',
+      params: sshConnectionNameParamSchema,
+      success: { data: sshHostKeyScanResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.INTERNAL_ERROR]: {},
+      },
+      description: 'Scan the host key fingerprints the remote currently presents',
+      tags: ['ssh'],
+    },
+    async (req, reply) => {
+      const { name } = req.params as { name: string };
+      try {
+        const scan = await opts.service.scanHostKey(name);
+        const response: SshHostKeyScanResponse = {
+          name,
+          host: scan.host,
+          port: scan.port,
+          keys: scan.keys.map((key) => ({ key_type: key.keyType, fingerprint: key.fingerprint })),
+        };
+        reply.send(okEnvelope(response, req.id));
+      } catch (error) {
+        sendSshError(reply, req, error);
+      }
+    },
+  );
+  app.get(
+    scanHostKeyRoute.path,
+    scanHostKeyRoute.options,
+    scanHostKeyRoute.handler as Parameters<SshConnectionsRouteHost['get']>[2],
+  );
+
+  const forgetHostKeyRoute = defineRoute(
+    {
+      method: 'POST',
+      path: '/ssh/connections/{name}/host-key/forget',
+      params: sshConnectionNameParamSchema,
+      success: { data: forgetSshHostKeyResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.INTERNAL_ERROR]: {},
+      },
+      description: 'Forget the stored host key for a connection, then retry test or connect',
+      tags: ['ssh'],
+    },
+    async (req, reply) => {
+      const { name } = req.params as { name: string };
+      try {
+        await opts.service.forgetHostKey(name);
+        reply.send(okEnvelope({ name, forgotten: true }, req.id));
+      } catch (error) {
+        sendSshError(reply, req, error);
+      }
+    },
+  );
+  app.post(
+    forgetHostKeyRoute.path,
+    forgetHostKeyRoute.options,
+    forgetHostKeyRoute.handler as Parameters<SshConnectionsRouteHost['post']>[2],
+  );
 }
 
 async function findConnection(
@@ -493,6 +581,8 @@ function toWire(info: SshConnectionInfo): SshConnectionWire {
       local_origin: info.status.localOrigin,
       error: info.status.error,
       needs_password: info.status.needsPassword,
+      host_key:
+        info.status.hostKey === undefined ? undefined : toHostKeyDetailsWire(info.status.hostKey),
     },
   };
 }
@@ -508,9 +598,26 @@ function toTestWire(result: SshTestResult): SshConnectionTestResultWire {
   };
 }
 
+function toHostKeyDetailsWire(details: SshHostKeyDetails): SshHostKeyDetailsWire {
+  return {
+    host: details.host,
+    port: details.port,
+    fingerprint: details.fingerprint,
+    key_type: details.keyType,
+    expected_fingerprint: details.expectedFingerprint,
+    known_hosts_file: details.knownHostsFile,
+    known_hosts_line: details.knownHostsLine,
+  };
+}
+
 function mapSshError(error: unknown): MappedSshError | undefined {
   if (!(error instanceof SshRemoteError)) {
     return undefined;
+  }
+  if (error.kind === 'host-key-changed') {
+    const details =
+      error.hostKey === undefined ? undefined : toHostKeyDetailsWire(error.hostKey);
+    return { code: ErrorCode.SSH_HOST_KEY_CHANGED, msg: error.message, details };
   }
   if (error.kind === 'config') {
     if (error.message.includes('not found')) {
@@ -537,7 +644,7 @@ function sendSshError(
 ): void {
   const mapped = mapSshError(error);
   if (mapped !== undefined) {
-    reply.send(errEnvelope(mapped.code, mapped.msg, req.id));
+    reply.send(errEnvelope(mapped.code, mapped.msg, req.id, undefined, mapped.details));
     return;
   }
   const message = error instanceof Error ? error.message : String(error);
