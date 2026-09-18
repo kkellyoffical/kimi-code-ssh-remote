@@ -188,7 +188,7 @@ describe('server-v2 /ssh/{name} proxy', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     const body = await res.text();
-    expect(body).toContain('SSH Connections');
+    expect(body).toContain('SSH 连接');
   });
 
   it('lazily connects and forwards requests, replacing auth and stripping cookie/host', async () => {
