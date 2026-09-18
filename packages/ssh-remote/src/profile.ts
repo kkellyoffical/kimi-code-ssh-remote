@@ -25,6 +25,7 @@ export const sshConnectionProfileSchema = z.object({
     .optional(),
   port: z.number().int().min(1).max(65535).default(DEFAULT_SSH_PORT),
   identityFile: z.string().min(1).optional(),
+  strictHostKeyChecking: z.boolean().optional(),
 });
 
 export type SshConnectionProfile = z.output<typeof sshConnectionProfileSchema>;

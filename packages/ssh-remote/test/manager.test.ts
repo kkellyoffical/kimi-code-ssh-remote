@@ -1,10 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SshRemoteError, isNeedsPasswordError } from '../src/errors';
+import { knownHostsTarget, parseHostKeyScan } from '../src/hostkeys';
 import { createSshConnectionManager } from '../src/manager';
 import { SecretsStore } from '../src/secrets';
 
@@ -449,5 +451,127 @@ describe('SshConnectionManager', () => {
     const [info] = await manager.list();
     expect(info?.hasPassword).toBe(false);
     await manager.close();
+  });
+
+  it('scanHostKey runs ssh-keyscan on the profile host and port and returns fingerprints', async () => {
+    const runner = new FakeProcessRunner();
+    const blob = Buffer.from('fake-ed25519-key-blob').toString('base64');
+    const expectedFingerprint = `SHA256:${createHash('sha256')
+      .update(Buffer.from(blob, 'base64'))
+      .digest('base64')
+      .replace(/=+$/, '')}`;
+    runner.onRun(/ssh-keyscan/, () => ({
+      code: 0,
+      stdout: [
+        '# dev.example.com:2222 SSH-2.0-OpenSSH_9.9',
+        `dev.example.com ssh-ed25519 ${blob}`,
+        '',
+      ].join('\n'),
+      stderr: '',
+    }));
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice', port: 2222 });
+    const keys = await manager.scanHostKey('devbox');
+    expect(keys).toEqual({
+      host: 'dev.example.com',
+      port: 2222,
+      keys: [{ keyType: 'ssh-ed25519', fingerprint: expectedFingerprint }],
+    });
+    expect(runner.lastRun().argv).toEqual([
+      'ssh-keyscan',
+      '-T',
+      '10',
+      '-p',
+      '2222',
+      'dev.example.com',
+    ]);
+    await manager.close();
+  });
+
+  it('scanHostKey rejects unknown connections and unscannable hosts', async () => {
+    const runner = new FakeProcessRunner();
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await expect(manager.scanHostKey('ghost')).rejects.toThrow(SshRemoteError);
+    runner.defaultResult = { code: 1, stdout: '', stderr: 'no route to host' };
+    const error: unknown = await manager.scanHostKey('devbox').catch((error) => error);
+    expect(error).toBeInstanceOf(SshRemoteError);
+    expect((error as SshRemoteError).kind).toBe('host-unreachable');
+    await manager.close();
+  });
+
+  it('forgetHostKey removes the stored key with ssh-keygen -R', async () => {
+    const runner = new FakeProcessRunner();
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice', port: 2222 });
+    await manager.add({ name: 'plain', host: 'plain.example.com' });
+    await manager.forgetHostKey('devbox');
+    expect(runner.lastRun().argv).toEqual(['ssh-keygen', '-R', '[dev.example.com]:2222']);
+    await manager.forgetHostKey('plain');
+    expect(runner.lastRun().argv).toEqual(['ssh-keygen', '-R', 'plain.example.com']);
+    await manager.close();
+  });
+
+  it('forgetHostKey surfaces ssh-keygen failures', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = { code: 255, stdout: '', stderr: 'known_hosts: No such file' };
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const error: unknown = await manager.forgetHostKey('devbox').catch((error) => error);
+    expect(error).toBeInstanceOf(SshRemoteError);
+    expect((error as SshRemoteError).message).toContain('dev.example.com');
+    await manager.close();
+  });
+
+  it('exposes host key details from test() and status() when the host key changed', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = {
+      code: 255,
+      stdout: '',
+      stderr: [
+        'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!',
+        'The fingerprint for the ED25519 key sent by the remote host is',
+        'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+        'Offending ED25519 key in /home/alice/.ssh/known_hosts:17',
+        'Host key verification failed.',
+      ].join('\n'),
+    };
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const result = await manager.test('devbox');
+    expect(result.ok).toBe(false);
+    expect(result.hostKey).toMatchObject({
+      host: 'dev.example.com',
+      port: 22,
+      fingerprint: 'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+      keyType: 'ssh-ed25519',
+      knownHostsFile: '/home/alice/.ssh/known_hosts',
+      knownHostsLine: 17,
+    });
+    expect(result.error).toContain('ssh-keygen -R dev.example.com');
+    await manager.connect('devbox').catch(() => {});
+    const status = manager.status('devbox');
+    expect(status.state).toBe('error');
+    expect(status.hostKey?.fingerprint).toBe('SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.');
+    await manager.close();
+  });
+});
+
+describe('parseHostKeyScan', () => {
+  it('skips comments and blank lines and parses key type and fingerprint', () => {
+    const blob = Buffer.from('key-blob').toString('base64');
+    const keys = parseHostKeyScan(
+      `# banner\n\nexample.com,203.0.113.10 ssh-ed25519 ${blob}\ngarbage\n`,
+    );
+    expect(keys).toHaveLength(1);
+    expect(keys[0]?.keyType).toBe('ssh-ed25519');
+    expect(keys[0]?.fingerprint.startsWith('SHA256:')).toBe(true);
+  });
+});
+
+describe('knownHostsTarget', () => {
+  it('brackets non-default ports only', () => {
+    expect(knownHostsTarget('example.com', 22)).toBe('example.com');
+    expect(knownHostsTarget('example.com', 2222)).toBe('[example.com]:2222');
   });
 });

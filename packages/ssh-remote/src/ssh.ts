@@ -2,8 +2,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { SshRemoteError, type SshErrorKind } from './errors';
-import { sshDestination, type SshConnectionProfile } from './profile';
+import { SshRemoteError, type SshErrorKind, type SshHostKeyDetails } from './errors';
+import { knownHostsTarget, readStoredHostKeyFingerprint } from './hostkeys';
+import { DEFAULT_SSH_PORT, sshDestination, type SshConnectionProfile } from './profile';
 import type { ProcessRunner, RunResult } from './runner';
 
 export type SshConnectionState = 'connected' | 'disconnected';
@@ -75,9 +76,7 @@ export class SshClient {
     await mkdir(this.controlDir, { recursive: true, mode: 0o700 });
     const result = await this.runSsh(['true'], (this.connectTimeoutSeconds + 5) * 1000);
     if (result.code !== 0) {
-      throw toSshError(result, `cannot connect to ${this.destination}`, {
-        needsPassword: classifySshError(result) === 'auth',
-      });
+      throw await this.toError(result, `cannot connect to ${this.destination}`);
     }
   }
 
@@ -103,9 +102,7 @@ export class SshClient {
   async execOrThrow(command: string, options?: { timeoutMs?: number }): Promise<string> {
     const result = await this.exec(command, options);
     if (result.code !== 0) {
-      throw toSshError(result, `remote command failed on ${this.destination}: ${command}`, {
-        needsPassword: classifySshError(result) === 'auth',
-      });
+      throw await this.toError(result, `remote command failed on ${this.destination}: ${command}`);
     }
     return result.stdout;
   }
@@ -121,10 +118,26 @@ export class SshClient {
       120_000,
     );
     if (result.code !== 0) {
-      throw toSshError(result, `cannot upload ${localPath} to ${this.destination}`, {
-        needsPassword: classifySshError(result) === 'auth',
-      });
+      throw await this.toError(result, `cannot upload ${localPath} to ${this.destination}`);
     }
+  }
+
+  private async toError(result: RunResult, context: string): Promise<SshRemoteError> {
+    let expectedHostKeyFingerprint: string | undefined;
+    if (classifySshError(result) === 'host-key-changed') {
+      const offending = parseOffendingHostKey(result.stderr);
+      if (offending !== undefined) {
+        expectedHostKeyFingerprint = await readStoredHostKeyFingerprint(
+          offending.file,
+          offending.line,
+        );
+      }
+    }
+    return toSshError(result, context, {
+      needsPassword: classifySshError(result) === 'auth',
+      hostKeyContext: { host: this.profile.host, port: this.profile.port },
+      expectedHostKeyFingerprint,
+    });
   }
 
   private scpArgs(): string[] {
@@ -139,6 +152,8 @@ export class SshClient {
       `ControlPath=${this.controlPath}`,
       '-o',
       `ControlPersist=${this.controlPersistSeconds}`,
+      '-o',
+      `StrictHostKeyChecking=${this.profile.strictHostKeyChecking === true ? 'yes' : 'accept-new'}`,
     ];
     if (options?.batchMode ?? true) {
       args.push('-o', 'BatchMode=yes');
@@ -211,6 +226,9 @@ export function classifySshError(result: RunResult): SshErrorKind {
   if (result.code === 127 || /command not found/i.test(stderr)) {
     return 'remote-missing-binary';
   }
+  if (/remote host identification has changed/i.test(stderr)) {
+    return 'host-key-changed';
+  }
   if (/permission denied|too many authentication failures/i.test(stderr)) {
     return 'auth';
   }
@@ -231,16 +249,66 @@ export function classifySshError(result: RunResult): SshErrorKind {
   return 'unknown';
 }
 
+export function parseOffendingHostKey(stderr: string): { file: string; line: number } | undefined {
+  const match = /Offending\b[^\n]*?\bkey in (.+):(\d+)[^\n]*$/im.exec(stderr);
+  if (match === null || match[1] === undefined || match[2] === undefined) return undefined;
+  return { file: match[1].trim(), line: Number(match[2]) };
+}
+
+export function parsePresentedHostKey(
+  stderr: string,
+): { fingerprint: string; keyType: string } | undefined {
+  const match = /fingerprint for the (\S+) key sent by the remote host is\s+(\S+)/i.exec(stderr);
+  if (match === null || match[1] === undefined || match[2] === undefined) return undefined;
+  return { fingerprint: match[2], keyType: normalizeBannerKeyType(match[1]) };
+}
+
 export function toSshError(
   result: RunResult,
   context: string,
-  options?: { needsPassword?: boolean },
+  options?: {
+    needsPassword?: boolean;
+    hostKeyContext?: { host: string; port: number };
+    expectedHostKeyFingerprint?: string;
+  },
 ): SshRemoteError {
   const kind = classifySshError(result);
   const detail = result.stderr.trim();
-  return new SshRemoteError(
-    kind,
-    detail.length > 0 ? `${context}: ${detail}` : `${context} (exit code ${result.code})`,
-    { stderr: result.stderr, needsPassword: options?.needsPassword },
-  );
+  let message =
+    detail.length > 0 ? `${context}: ${detail}` : `${context} (exit code ${result.code})`;
+  let hostKey: SshHostKeyDetails | undefined;
+  if (kind === 'host-key-changed') {
+    const offending = parseOffendingHostKey(result.stderr);
+    const presented = parsePresentedHostKey(result.stderr);
+    hostKey = {
+      host: options?.hostKeyContext?.host ?? '',
+      port: options?.hostKeyContext?.port ?? DEFAULT_SSH_PORT,
+      fingerprint: presented?.fingerprint,
+      keyType: presented?.keyType,
+      expectedFingerprint: options?.expectedHostKeyFingerprint,
+      knownHostsFile: offending?.file,
+      knownHostsLine: offending?.line,
+    };
+    const removal =
+      options?.hostKeyContext !== undefined
+        ? `ssh-keygen -R ${knownHostsTarget(options.hostKeyContext.host, options.hostKeyContext.port)}`
+        : 'ssh-keygen -R <host>';
+    const where =
+      offending !== undefined
+        ? ` (offending key at ${offending.file}:${offending.line})`
+        : '';
+    message = `${message}. The stored host key for this server has changed${where}. If you expected this change (for example the server was reinstalled), remove the old key with \`${removal}\` and reconnect; if you did not expect it, do not connect — the server may be impersonated.`;
+  }
+  return new SshRemoteError(kind, message, {
+    stderr: result.stderr,
+    needsPassword: options?.needsPassword,
+    hostKey,
+  });
+}
+
+function normalizeBannerKeyType(banner: string): string {
+  const upper = banner.toUpperCase();
+  if (upper === 'RSA') return 'ssh-rsa';
+  if (upper === 'ED25519') return 'ssh-ed25519';
+  return banner;
 }
