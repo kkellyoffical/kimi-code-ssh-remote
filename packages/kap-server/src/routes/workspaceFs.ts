@@ -1,6 +1,6 @@
 import { createReadStream, type ReadStream } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 import {
   ErrorCodes,
@@ -56,9 +56,32 @@ interface WorkspaceFsRouteHost {
       reply: { send(payload: unknown): unknown },
     ) => Promise<void> | void,
   ): unknown;
+  put(
+    path: string,
+    options: { preHandler: unknown[]; schema?: Record<string, unknown> } | undefined,
+    handler: (
+      req: { id: string; query: { path?: string }; body: unknown },
+      reply: { send(payload: unknown): unknown },
+    ) => Promise<void> | void,
+  ): unknown;
+  addContentTypeParser(
+    contentType: string,
+    opts: { parseAs: 'buffer'; bodyLimit: number },
+    parser: (req: unknown, body: unknown, done: (err: null, body: unknown) => void) => void,
+  ): unknown;
 }
 
+const MAX_FS_WRITE_BYTES = 10 * 1024 * 1024;
+
 export function registerWorkspaceFsRoutes(app: WorkspaceFsRouteHost, core: Scope): void {
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer', bodyLimit: MAX_FS_WRITE_BYTES },
+    (_req, body, done) => {
+      done(null, body);
+    },
+  );
+
   const browseRoute = defineRoute(
     {
       method: 'GET',
@@ -73,8 +96,8 @@ export function registerWorkspaceFsRoutes(app: WorkspaceFsRouteHost, core: Scope
       try {
         const data = await core.accessor.get(IHostFolderBrowser).browse(req.query.path);
         reply.send(okEnvelope(data, req.id));
-      } catch (err) {
-        sendMappedError(reply, req.id, err);
+      } catch (error) {
+        sendMappedError(reply, req.id, error);
       }
     },
   );
@@ -97,8 +120,8 @@ export function registerWorkspaceFsRoutes(app: WorkspaceFsRouteHost, core: Scope
       try {
         const data = await core.accessor.get(IHostFolderBrowser).home();
         reply.send(okEnvelope(data, req.id));
-      } catch (err) {
-        sendMappedError(reply, req.id, err);
+      } catch (error) {
+        sendMappedError(reply, req.id, error);
       }
     },
   );
@@ -106,6 +129,97 @@ export function registerWorkspaceFsRoutes(app: WorkspaceFsRouteHost, core: Scope
     homeRoute.path,
     homeRoute.options,
     homeRoute.handler as unknown as Parameters<WorkspaceFsRouteHost['get']>[2],
+  );
+
+  const listRoute = defineRoute(
+    {
+      method: 'GET',
+      path: '/fs::list',
+      querystring: fsListQuerySchema,
+      success: { data: fsListResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.FS_PATH_NOT_FOUND]: {},
+        [ErrorCode.FS_PERMISSION_DENIED]: {},
+      },
+      description: 'List files and directories at an absolute host path (file manager backend)',
+      tags: ['workspaces'],
+      operationId: 'fsList',
+    },
+    async (req, reply) => {
+      const { path } = req.query as { path: string };
+      if (!isAbsolute(path)) {
+        reply.send(
+          errEnvelope(ErrorCode.VALIDATION_FAILED, `path must be absolute: ${path}`, req.id),
+        );
+        return;
+      }
+      const hostFs = core.accessor.get(IHostFileSystem);
+      let abs: string;
+      let st: HostFileStat;
+      try {
+        abs = await hostFs.realpath(path);
+        st = await hostFs.stat(abs);
+      } catch (error) {
+        sendOsFsError(reply, req.id, error, path);
+        return;
+      }
+      if (!st.isDirectory) {
+        reply.send(
+          errEnvelope(ErrorCode.VALIDATION_FAILED, `path is not a directory: ${path}`, req.id),
+        );
+        return;
+      }
+      let dirEntries;
+      try {
+        dirEntries = await hostFs.readdir(abs);
+      } catch (error) {
+        sendOsFsError(reply, req.id, error, path);
+        return;
+      }
+      const entries = await Promise.all(
+        dirEntries.map(async (entry) => {
+          const full = join(abs, entry.name);
+          if (entry.isDirectory) {
+            return { name: entry.name, path: full, is_dir: true };
+          }
+          try {
+            const fileStat = await hostFs.stat(full);
+            return {
+              name: entry.name,
+              path: full,
+              is_dir: false,
+              size: fileStat.size,
+              modified_at:
+                fileStat.mtimeMs === undefined
+                  ? undefined
+                  : new Date(fileStat.mtimeMs).toISOString(),
+            };
+          } catch {
+            return { name: entry.name, path: full, is_dir: false };
+          }
+        }),
+      );
+      entries.sort((a, b) => {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        const aDot = a.name.startsWith('.');
+        const bDot = b.name.startsWith('.');
+        if (aDot !== bDot) return aDot ? 1 : -1;
+        return a.name.localeCompare(b.name);
+      });
+      const parent = dirname(abs);
+      reply.send(
+        okEnvelope(
+          { path: abs, parent: parent === abs ? null : parent, entries },
+          req.id,
+        ),
+      );
+    },
+  );
+  app.get(
+    listRoute.path,
+    listRoute.options,
+    listRoute.handler as unknown as Parameters<WorkspaceFsRouteHost['get']>[2],
   );
 
   const contentRoute = defineRoute(
@@ -164,10 +278,114 @@ export function registerWorkspaceFsRoutes(app: WorkspaceFsRouteHost, core: Scope
     mkdirRoute.options,
     mkdirRoute.handler as unknown as Parameters<WorkspaceFsRouteHost['post']>[2],
   );
+
+  const writeRoute = defineRoute(
+    {
+      method: 'PUT',
+      path: '/fs::content',
+      querystring: fsContentQuerySchema,
+      success: { data: fsWriteResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.FS_PATH_NOT_FOUND]: {},
+        [ErrorCode.FS_PERMISSION_DENIED]: {},
+        [ErrorCode.FS_IS_DIRECTORY]: {},
+        [ErrorCode.FS_TOO_LARGE]: {},
+      },
+      description:
+        'Write the raw request body (application/octet-stream, up to 10 MiB) to a file at an absolute host path. The parent directory must already exist.',
+      tags: ['workspaces'],
+      operationId: 'fsWrite',
+      consumes: ['application/octet-stream'],
+    },
+    async (req, reply) => {
+      const { path } = req.query as { path: string };
+      if (!isAbsolute(path)) {
+        reply.send(
+          errEnvelope(ErrorCode.VALIDATION_FAILED, `path must be absolute: ${path}`, req.id),
+        );
+        return;
+      }
+      if (!Buffer.isBuffer(req.body)) {
+        reply.send(
+          errEnvelope(
+            ErrorCode.VALIDATION_FAILED,
+            'request body must be raw bytes with content-type application/octet-stream',
+            req.id,
+          ),
+        );
+        return;
+      }
+      const hostFs = core.accessor.get(IHostFileSystem);
+      const parent = dirname(path);
+      let parentAbs: string;
+      let parentStat: HostFileStat;
+      try {
+        parentAbs = await hostFs.realpath(parent);
+        parentStat = await hostFs.stat(parentAbs);
+      } catch (error) {
+        sendOsFsError(reply, req.id, error, parent);
+        return;
+      }
+      if (!parentStat.isDirectory) {
+        reply.send(
+          errEnvelope(
+            ErrorCode.FS_PATH_NOT_FOUND,
+            `parent path is not a directory: ${parent}`,
+            req.id,
+          ),
+        );
+        return;
+      }
+      const abs = join(parentAbs, basename(path));
+      try {
+        const existing = await hostFs.stat(abs).catch(() => undefined);
+        if (existing?.isDirectory === true) {
+          reply.send(
+            errEnvelope(ErrorCode.FS_IS_DIRECTORY, `path is a directory: ${path}`, req.id),
+          );
+          return;
+        }
+        await hostFs.writeBytes(abs, req.body);
+      } catch (error) {
+        sendOsFsError(reply, req.id, error, path);
+        return;
+      }
+      reply.send(okEnvelope({ path: abs, size: req.body.length }, req.id));
+    },
+  );
+  app.put(
+    writeRoute.path,
+    writeRoute.options,
+    writeRoute.handler as unknown as Parameters<WorkspaceFsRouteHost['put']>[2],
+  );
 }
 
 const fsContentQuerySchema = z.object({
   path: z.string().min(1),
+});
+
+const fsListQuerySchema = z.object({
+  path: z.string().min(1),
+});
+
+const fsListEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  is_dir: z.boolean(),
+  size: z.number().int().optional(),
+  modified_at: z.string().optional(),
+});
+
+const fsListResponseSchema = z.object({
+  path: z.string(),
+  parent: z.string().nullable(),
+  entries: z.array(fsListEntrySchema),
+});
+
+const fsWriteResponseSchema = z.object({
+  path: z.string(),
+  size: z.number().int(),
 });
 
 interface FsContentRequest {
@@ -197,8 +415,8 @@ async function handleFsContent(
   try {
     abs = await hostFs.realpath(path);
     st = await hostFs.stat(abs);
-  } catch (err) {
-    sendOsFsError(reply, requestId, err, path);
+  } catch (error) {
+    sendOsFsError(reply, requestId, error, path);
     return;
   }
 
@@ -226,8 +444,8 @@ async function handleFsContent(
       sampleSize === 0 ? new Uint8Array() : await hostFs.readBytes(abs, sampleSize);
     const classification = classifyTextSample(sample);
     isBinary = classification.isBinary || classification.encoding !== 'utf-8';
-  } catch (err) {
-    sendOsFsError(reply, requestId, err, path);
+  } catch (error) {
+    sendOsFsError(reply, requestId, error, path);
     return;
   }
 
@@ -296,8 +514,8 @@ async function handleFsMkdir(
 
   try {
     await mkdir(path);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
     switch (code) {
       case 'EEXIST':
         reply.send(
@@ -317,7 +535,7 @@ async function handleFsMkdir(
         );
         return;
     }
-    throw err;
+    throw error;
   }
 
   reply.send(okEnvelope({ path }, requestId));

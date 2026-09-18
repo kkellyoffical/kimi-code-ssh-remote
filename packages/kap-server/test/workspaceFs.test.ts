@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -118,7 +118,7 @@ describe('server-v2 /api/v1 fs folder picker', () => {
     );
     expect(body.code).toBe(0);
     expect(body.data.path).toBe(await realpath(root));
-    const names = body.data.entries.map((e) => e.name).sort();
+    const names = body.data.entries.map((e) => e.name).toSorted();
     expect(names).toEqual(['alpha', 'beta']);
     for (const entry of body.data.entries) {
       expect(entry.is_dir).toBe(true);
@@ -433,5 +433,208 @@ describe('server-v2 /api/v1 fs:content', () => {
       headers: authHeaders(server as RunningServer),
     } as never);
     expect(res.status).toBe(404);
+  });
+});
+
+describe('server-v2 /api/v1 fs:list', () => {
+  let server: RunningServer | undefined;
+  let dir: string | undefined;
+  let instancesDir: string | undefined;
+  let base: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'kimi-server-v2-fslist-'));
+    instancesDir = await mkdtemp(join(tmpdir(), 'kimi-server-v2-fslist-instances-'));
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: dir,
+      instancesDir,
+      logLevel: 'silent',
+    });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(async () => {
+    if (server !== undefined) await server.close();
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true });
+    if (instancesDir !== undefined) await rm(instancesDir, { recursive: true, force: true });
+  });
+
+  interface ListEntryWire {
+    name: string;
+    path: string;
+    is_dir: boolean;
+    size?: number;
+    modified_at?: string;
+  }
+
+  interface ListWire {
+    path: string;
+    parent: string | null;
+    entries: ListEntryWire[];
+  }
+
+  async function getList(path: string): Promise<Envelope<ListWire>> {
+    const res = await fetch(`${base}/api/v1/fs:list?path=${encodeURIComponent(path)}`, {
+      headers: authHeaders(server as RunningServer),
+    } as never);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Envelope<ListWire>;
+  }
+
+  it('lists files and directories with metadata, directories first', async () => {
+    const root = await mkdtemp(join(dir as string, 'list-'));
+    await mkdir(join(root, 'subdir'));
+    await mkdir(join(root, '.hiddendir'));
+    await writeFile(join(root, 'notes.txt'), 'hello');
+
+    const body = await getList(root);
+    expect(body.code).toBe(0);
+    expect(body.data.path).toBe(await realpath(root));
+    expect(body.data.parent).toBe(await realpath(dir as string));
+    const names = body.data.entries.map((entry) => entry.name);
+    expect(names).toEqual(['subdir', '.hiddendir', 'notes.txt']);
+    const file = body.data.entries.find((entry) => entry.name === 'notes.txt');
+    expect(file?.is_dir).toBe(false);
+    expect(file?.size).toBe(5);
+    expect(typeof file?.modified_at).toBe('string');
+    const subdir = body.data.entries.find((entry) => entry.name === 'subdir');
+    expect(subdir?.is_dir).toBe(true);
+    expect(subdir?.path).toBe(join(await realpath(root), 'subdir'));
+  });
+
+  it('rejects a relative path (40001)', async () => {
+    const body = await getList('relative/path');
+    expect(body.code).toBe(40001);
+  });
+
+  it('rejects a nonexistent path (40409)', async () => {
+    const body = await getList(join(dir as string, 'does-not-exist'));
+    expect(body.code).toBe(40409);
+  });
+
+  it('rejects a regular file path (40001)', async () => {
+    const file = join(dir as string, 'plain.txt');
+    await writeFile(file, 'hi');
+    const body = await getList(file);
+    expect(body.code).toBe(40001);
+  });
+});
+
+describe('server-v2 /api/v1 fs:content write (PUT)', () => {
+  let server: RunningServer | undefined;
+  let dir: string | undefined;
+  let instancesDir: string | undefined;
+  let base: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'kimi-server-v2-fswrite-'));
+    instancesDir = await mkdtemp(join(tmpdir(), 'kimi-server-v2-fswrite-instances-'));
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: dir,
+      instancesDir,
+      logLevel: 'silent',
+    });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(async () => {
+    if (server !== undefined) await server.close();
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true });
+    if (instancesDir !== undefined) await rm(instancesDir, { recursive: true, force: true });
+  });
+
+  async function putContent(path: string, body: Buffer): Promise<Response> {
+    return fetch(`${base}/api/v1/fs:content?path=${encodeURIComponent(path)}`, {
+      method: 'PUT',
+      headers: authHeaders(server as RunningServer, {
+        'content-type': 'application/octet-stream',
+      }),
+      body: new Uint8Array(body),
+    } as never);
+  }
+
+  it('writes a new file byte-for-byte and serves it back', async () => {
+    const target = join(dir as string, 'upload.bin');
+    const payload = Buffer.from([0x00, 0x89, 0xff, 0x10, 0x7f, 0x00, 0x42]);
+
+    const res = await putContent(target, payload);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Envelope<{ path: string; size: number }>;
+    expect(body.code).toBe(0);
+    expect(body.data).toEqual({ path: await realpath(dir as string).then((d) => join(d, 'upload.bin')), size: payload.length });
+
+    const readBack = await fetch(
+      `${base}/api/v1/fs:content?path=${encodeURIComponent(target)}`,
+      { headers: authHeaders(server as RunningServer) } as never,
+    );
+    expect(readBack.status).toBe(200);
+    expect(Buffer.from(await readBack.arrayBuffer()).equals(payload)).toBe(true);
+  });
+
+  it('overwrites an existing file', async () => {
+    const target = join(dir as string, 'overwrite.txt');
+    await writeFile(target, 'old content');
+
+    const res = await putContent(target, Buffer.from('new content'));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Envelope<{ path: string; size: number }>;
+    expect(body.code).toBe(0);
+    expect(body.data.size).toBe(11);
+
+    expect(await readFile(target, 'utf8')).toBe('new content');
+  });
+
+  it('rejects a relative path (40001)', async () => {
+    const res = await putContent('relative/file.txt', Buffer.from('x'));
+    const body = (await res.json()) as Envelope<null>;
+    expect(body.code).toBe(40001);
+  });
+
+  it('rejects a missing parent directory (40409)', async () => {
+    const res = await putContent(join(dir as string, 'no-such-dir', 'file.txt'), Buffer.from('x'));
+    const body = (await res.json()) as Envelope<null>;
+    expect(body.code).toBe(40409);
+  });
+
+  it('rejects a directory target (40906)', async () => {
+    const res = await putContent(dir as string, Buffer.from('x'));
+    const body = (await res.json()) as Envelope<null>;
+    expect(body.code).toBe(40906);
+  });
+
+  it('rejects bodies over the 10 MiB limit (41302)', async () => {
+    const target = join(dir as string, 'too-large.bin');
+    let envelopeCode: number | undefined;
+    try {
+      const res = await putContent(target, Buffer.alloc(10 * 1024 * 1024 + 1, 0x61));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Envelope<null>;
+      envelopeCode = body.code;
+    } catch (error) {
+      expect(error).toBeInstanceOf(TypeError);
+    }
+    if (envelopeCode !== undefined) {
+      expect(envelopeCode).toBe(41302);
+    }
+    await expect(stat(target)).rejects.toThrow();
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects writes into a read-only directory (40411)', async () => {
+    const locked = join(dir as string, 'locked');
+    await mkdir(locked);
+    await chmod(locked, 0o555);
+    try {
+      const res = await putContent(join(locked, 'file.txt'), Buffer.from('x'));
+      const body = (await res.json()) as Envelope<null>;
+      expect(body.code).toBe(40411);
+    } finally {
+      await chmod(locked, 0o755);
+    }
   });
 });

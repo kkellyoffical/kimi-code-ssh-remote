@@ -1,5 +1,6 @@
 import {
   SshRemoteError,
+  type SshAuthOptions,
   type SshConnectionInfo,
   type SshConnectionManager,
   type SshTestResult,
@@ -15,9 +16,13 @@ import {
   deleteSshConnectionResponseSchema,
   disconnectSshConnectionResponseSchema,
   listSshConnectionsResponseSchema,
+  setSshConnectionPasswordRequestSchema,
+  sshConnectionAuthRequestSchema,
   sshConnectionNameParamSchema,
+  sshConnectionPasswordStateSchema,
   sshConnectionSchema,
   sshConnectionTestResultSchema,
+  submitSshConnectionPasswordRequestSchema,
   type ConnectSshConnectionResponse,
   type DisconnectSshConnectionResponse,
   type SshConnectionTestResultWire,
@@ -46,6 +51,14 @@ interface SshConnectionsRouteHost {
     options: { preHandler: unknown[]; schema?: Record<string, unknown> },
     handler: (
       req: { id: string; params: unknown },
+      reply: { send(payload: unknown): unknown },
+    ) => Promise<void> | void,
+  ): unknown;
+  put(
+    path: string,
+    options: { preHandler: unknown[]; schema?: Record<string, unknown> },
+    handler: (
+      req: { id: string; body: unknown; params: unknown },
       reply: { send(payload: unknown): unknown },
     ) => Promise<void> | void,
   ): unknown;
@@ -109,7 +122,19 @@ export function registerSshConnectionsRoutes(
         user?: string;
         port?: number;
         identity_file?: string;
+        password?: string;
+        save_password?: boolean;
       };
+      if (body.password !== undefined && body.save_password !== true) {
+        reply.send(
+          errEnvelope(
+            ErrorCode.VALIDATION_FAILED,
+            'save_password must be true when password is provided',
+            req.id,
+          ),
+        );
+        return;
+      }
       try {
         const info = await opts.service.add({
           name: body.name,
@@ -118,7 +143,15 @@ export function registerSshConnectionsRoutes(
           port: body.port,
           identityFile: body.identity_file,
         });
-        reply.send(okEnvelope(toWire(info), req.id));
+        if (body.password !== undefined) {
+          await opts.service.setPassword(body.name, body.password);
+        }
+        reply.send(
+          okEnvelope(
+            { ...toWire(info), has_password: body.password !== undefined || info.hasPassword === true },
+            req.id,
+          ),
+        );
       } catch (error) {
         sendSshError(reply, req, error);
       }
@@ -200,6 +233,78 @@ export function registerSshConnectionsRoutes(
     deleteRoute.handler as Parameters<SshConnectionsRouteHost['delete']>[2],
   );
 
+  const setPasswordRoute = defineRoute(
+    {
+      method: 'PUT',
+      path: '/ssh/connections/{name}/password',
+      params: sshConnectionNameParamSchema,
+      body: setSshConnectionPasswordRequestSchema,
+      success: { data: sshConnectionPasswordStateSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.INTERNAL_ERROR]: {},
+      },
+      description: 'Store or overwrite the saved password for an SSH connection without connecting',
+      tags: ['ssh'],
+    },
+    async (req, reply) => {
+      const { name } = req.params as { name: string };
+      const body = req.body as { password: string };
+      try {
+        await opts.service.setPassword(name, body.password);
+        reply.send(okEnvelope({ name, has_password: true }, req.id));
+      } catch (error) {
+        sendSshError(reply, req, error);
+      }
+    },
+  );
+  app.put(
+    setPasswordRoute.path,
+    setPasswordRoute.options,
+    setPasswordRoute.handler as Parameters<SshConnectionsRouteHost['put']>[2],
+  );
+
+  const clearPasswordRoute = defineRoute(
+    {
+      method: 'DELETE',
+      path: '/ssh/connections/{name}/password',
+      params: sshConnectionNameParamSchema,
+      success: { data: sshConnectionPasswordStateSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.INTERNAL_ERROR]: {},
+      },
+      description: 'Clear the saved password for an SSH connection',
+      tags: ['ssh'],
+    },
+    async (req, reply) => {
+      const { name } = req.params as { name: string };
+      try {
+        if ((await findConnection(opts.service, name)) === undefined) {
+          reply.send(
+            errEnvelope(
+              ErrorCode.SSH_CONNECTION_NOT_FOUND,
+              `ssh connection "${name}" not found`,
+              req.id,
+            ),
+          );
+          return;
+        }
+        await opts.service.clearPassword(name);
+        reply.send(okEnvelope({ name, has_password: false }, req.id));
+      } catch (error) {
+        sendSshError(reply, req, error);
+      }
+    },
+  );
+  app.delete(
+    clearPasswordRoute.path,
+    clearPasswordRoute.options,
+    clearPasswordRoute.handler as Parameters<SshConnectionsRouteHost['delete']>[2],
+  );
+
   if (opts.enableWrite === false) {
     return;
   }
@@ -209,10 +314,12 @@ export function registerSshConnectionsRoutes(
       method: 'POST',
       path: '/ssh/connections/{name}/test',
       params: sshConnectionNameParamSchema,
+      body: sshConnectionAuthRequestSchema.optional(),
       success: { data: sshConnectionTestResultSchema },
       errors: {
         [ErrorCode.VALIDATION_FAILED]: {},
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.SSH_AUTH_REQUIRED]: {},
         [ErrorCode.INTERNAL_ERROR]: {},
       },
       description: 'Probe an SSH connection: handshake plus remote kap-server detection',
@@ -220,8 +327,9 @@ export function registerSshConnectionsRoutes(
     },
     async (req, reply) => {
       const { name } = req.params as { name: string };
+      const body = authOptionsOf(req.body);
       try {
-        const result = await opts.service.test(name);
+        const result = await opts.service.test(name, body);
         reply.send(okEnvelope(toTestWire(result), req.id));
       } catch (error) {
         sendSshError(reply, req, error);
@@ -239,10 +347,12 @@ export function registerSshConnectionsRoutes(
       method: 'POST',
       path: '/ssh/connections/{name}/connect',
       params: sshConnectionNameParamSchema,
+      body: sshConnectionAuthRequestSchema.optional(),
       success: { data: connectSshConnectionResponseSchema },
       errors: {
         [ErrorCode.VALIDATION_FAILED]: {},
         [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.SSH_AUTH_REQUIRED]: {},
         [ErrorCode.SSH_UNREACHABLE]: {},
         [ErrorCode.INTERNAL_ERROR]: {},
       },
@@ -251,8 +361,9 @@ export function registerSshConnectionsRoutes(
     },
     async (req, reply) => {
       const { name } = req.params as { name: string };
+      const body = authOptionsOf(req.body);
       try {
-        const handle = await opts.service.connect(name);
+        const handle = await opts.service.connect(name, body);
         const response: ConnectSshConnectionResponse = {
           name,
           state: 'on',
@@ -268,6 +379,48 @@ export function registerSshConnectionsRoutes(
     connectRoute.path,
     connectRoute.options,
     connectRoute.handler as Parameters<SshConnectionsRouteHost['post']>[2],
+  );
+
+  const submitPasswordRoute = defineRoute(
+    {
+      method: 'POST',
+      path: '/ssh/connections/{name}/password',
+      params: sshConnectionNameParamSchema,
+      body: submitSshConnectionPasswordRequestSchema,
+      success: { data: connectSshConnectionResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.SSH_CONNECTION_NOT_FOUND]: {},
+        [ErrorCode.SSH_AUTH_REQUIRED]: {},
+        [ErrorCode.SSH_UNREACHABLE]: {},
+        [ErrorCode.INTERNAL_ERROR]: {},
+      },
+      description: 'Submit an SSH password and connect, persisting it when save_password is true',
+      tags: ['ssh'],
+    },
+    async (req, reply) => {
+      const { name } = req.params as { name: string };
+      const body = req.body as { password: string; save_password?: boolean };
+      try {
+        const handle = await opts.service.connect(name, {
+          password: body.password,
+          savePassword: body.save_password,
+        });
+        const response: ConnectSshConnectionResponse = {
+          name,
+          state: 'on',
+          local_origin: handle.localOrigin,
+        };
+        reply.send(okEnvelope(response, req.id));
+      } catch (error) {
+        sendSshError(reply, req, error);
+      }
+    },
+  );
+  app.post(
+    submitPasswordRoute.path,
+    submitPasswordRoute.options,
+    submitPasswordRoute.handler as Parameters<SshConnectionsRouteHost['post']>[2],
   );
 
   const disconnectRoute = defineRoute(
@@ -320,6 +473,13 @@ async function findConnection(
   return connections.find((connection) => connection.name === name);
 }
 
+function authOptionsOf(body: unknown): SshAuthOptions | undefined {
+  if (body === undefined || body === null) return undefined;
+  const auth = body as { password?: string; save_password?: boolean };
+  if (auth.password === undefined && auth.save_password === undefined) return undefined;
+  return { password: auth.password, savePassword: auth.save_password };
+}
+
 function toWire(info: SshConnectionInfo): SshConnectionWire {
   return {
     name: info.name,
@@ -327,10 +487,12 @@ function toWire(info: SshConnectionInfo): SshConnectionWire {
     user: info.user,
     port: info.port,
     identity_file: info.identityFile,
+    has_password: info.hasPassword === true,
     status: {
       state: info.status.state,
       local_origin: info.status.localOrigin,
       error: info.status.error,
+      needs_password: info.status.needsPassword,
     },
   };
 }
@@ -342,6 +504,7 @@ function toTestWire(result: SshTestResult): SshConnectionTestResultWire {
     kimi_path: result.kimiPath,
     server_running: result.serverRunning,
     error: result.error,
+    needs_password: result.needsPassword,
   };
 }
 
@@ -357,6 +520,9 @@ function mapSshError(error: unknown): MappedSshError | undefined {
       return { code: ErrorCode.SSH_CONNECTION_ALREADY_EXISTS, msg: error.message };
     }
     return { code: ErrorCode.VALIDATION_FAILED, msg: error.message };
+  }
+  if (error.kind === 'auth') {
+    return { code: ErrorCode.SSH_AUTH_REQUIRED, msg: error.message };
   }
   if (error.kind === 'unknown') {
     return undefined;

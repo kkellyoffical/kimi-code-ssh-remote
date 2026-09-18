@@ -23,6 +23,12 @@ export function installErrorHandler(app: ErrorHandlerHost): void {
         .send(errEnvelope(ErrorCode.VALIDATION_FAILED, err.message, requestId, err.stack));
       return;
     }
+    if (err.statusCode === 413) {
+      reply
+        .status(200)
+        .send(errEnvelope(ErrorCode.FS_TOO_LARGE, err.message, requestId));
+      return;
+    }
     req.log.error({ err, request_id: requestId }, 'unhandled error');
     reply.status(200).send(
       errEnvelope(

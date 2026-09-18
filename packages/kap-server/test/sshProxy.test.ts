@@ -358,3 +358,137 @@ describe('server-v2 /ssh page entry url', () => {
     );
   });
 });
+
+
+describe('server-v2 /ssh/{name} proxy to a real kap-server', () => {
+  let remoteServer: RunningServer | undefined;
+  let localServer: RunningServer | undefined;
+  let remoteHome: string | undefined;
+  let localHome: string | undefined;
+  let workDir: string | undefined;
+  let base: string;
+
+  beforeAll(async () => {
+    remoteHome = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-e2e-remote-'));
+    localHome = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-e2e-local-'));
+    workDir = await mkdtemp(join(tmpdir(), 'kimi-server-v2-ssh-e2e-work-'));
+    remoteServer = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: remoteHome,
+      logLevel: 'silent',
+    });
+    const remoteOrigin = `http://127.0.0.1:${remoteServer.port}`;
+    const remoteToken = bearerToken(remoteServer);
+    const fake = fakeSshConnectionManager({
+      handleFor: () => ({ localOrigin: remoteOrigin, remoteToken }),
+    });
+    localServer = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: localHome,
+      logLevel: 'silent',
+      sshConnectionManager: fake,
+    });
+    base = `http://127.0.0.1:${localServer.port}`;
+    const add = await authedFetch(localServer, base, '/api/v1/ssh/connections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'e2e', host: 'example.com' }),
+    });
+    if (add.status !== 200) {
+      throw new Error(`failed to seed e2e connection: ${add.status}`);
+    }
+  });
+
+  afterAll(async () => {
+    if (localServer !== undefined) await localServer.close();
+    if (remoteServer !== undefined) await remoteServer.close();
+    if (localHome !== undefined) await rm(localHome, { recursive: true, force: true });
+    if (remoteHome !== undefined) await rm(remoteHome, { recursive: true, force: true });
+    if (workDir !== undefined) await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('writes, lists, and downloads remote files through the tunnel', async () => {
+    const target = join(workDir as string, 'through-tunnel.txt');
+    const payload = Buffer.from('proxied content ✅');
+
+    const written = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:content?path=${encodeURIComponent(target)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: new Uint8Array(payload) as unknown as string,
+      },
+    );
+    expect(written.status).toBe(200);
+    const writtenBody = (await written.json()) as { code: number; data: { size: number } };
+    expect(writtenBody.code).toBe(0);
+    expect(writtenBody.data.size).toBe(payload.length);
+
+    const listed = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:list?path=${encodeURIComponent(workDir as string)}`,
+    );
+    const listedBody = (await listed.json()) as {
+      code: number;
+      data: { entries: { name: string; is_dir: boolean; size?: number }[] };
+    };
+    expect(listedBody.code).toBe(0);
+    const entry = listedBody.data.entries.find((item) => item.name === 'through-tunnel.txt');
+    expect(entry?.is_dir).toBe(false);
+    expect(entry?.size).toBe(payload.length);
+
+    const downloaded = await authedFetch(
+      localServer as RunningServer,
+      base,
+      `/ssh/e2e/api/v1/fs:content?path=${encodeURIComponent(target)}`,
+    );
+    expect(downloaded.status).toBe(200);
+    expect(Buffer.from(await downloaded.arrayBuffer()).equals(payload)).toBe(true);
+  });
+
+  it('creates a remote directory and lists remote workspaces through the tunnel', async () => {
+    const mkdirRes = await authedFetch(
+      localServer as RunningServer,
+      base,
+      '/ssh/e2e/api/v1/fs:mkdir',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: join(workDir as string, 'made-remotely') }),
+      },
+    );
+    const mkdirBody = (await mkdirRes.json()) as { code: number };
+    expect(mkdirBody.code).toBe(0);
+
+    const created = await authedFetch(
+      remoteServer as RunningServer,
+      `http://127.0.0.1:${remoteServer!.port}`,
+      '/api/v1/workspaces',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root: workDir }),
+      },
+    );
+    expect(created.status).toBe(200);
+
+    const listed = await authedFetch(
+      localServer as RunningServer,
+      base,
+      '/ssh/e2e/api/v1/workspaces',
+    );
+    const listedBody = (await listed.json()) as {
+      code: number;
+      data: { items: { id: string; root: string; name: string }[] };
+    };
+    expect(listedBody.code).toBe(0);
+    expect(listedBody.data.items.some((ws) => ws.root === workDir)).toBe(true);
+  });
+});
