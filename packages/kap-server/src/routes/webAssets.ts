@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, relative, resolve, sep } from 'node:path';
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -54,11 +54,44 @@ async function serveWebAsset(
     return reply.code(404).type('text/plain; charset=utf-8').send('Not found');
   }
 
+  if (relative(assetsDir, filePath) === 'index.html') {
+    const html = injectSshEntry(await readFile(filePath, 'utf8'));
+    return reply
+      .type('text/html; charset=utf-8')
+      .header('Cache-Control', cacheControl(assetsDir, filePath))
+      .header('Content-Length', String(Buffer.byteLength(html)))
+      .send(html);
+  }
+
   return reply
     .type(mimeType(filePath))
     .header('Cache-Control', cacheControl(assetsDir, filePath))
     .header('Content-Length', String(fileInfo.size))
     .send(createReadStream(filePath));
+}
+
+const SSH_ENTRY_MARKER = 'kimi-ssh-entry';
+
+const SSH_ENTRY_SCRIPT = `<script>
+(function () {
+  if (document.getElementById('kimi-ssh-entry') !== null) return;
+  var entry = document.createElement('a');
+  entry.id = 'kimi-ssh-entry';
+  entry.textContent = 'SSH';
+  var token = new URLSearchParams(location.hash.replace(/^#/, '')).get('token');
+  entry.href = token === null || token === '' ? '/ssh' : '/ssh#token=' + encodeURIComponent(token);
+  entry.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483000;padding:4px 10px;border-radius:6px;background:rgba(0,0,0,0.55);color:#fff;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-decoration:none;opacity:0.6;';
+  entry.addEventListener('mouseenter', function () { entry.style.opacity = '1'; });
+  entry.addEventListener('mouseleave', function () { entry.style.opacity = '0.6'; });
+  document.body.appendChild(entry);
+})();
+</script>`;
+
+function injectSshEntry(html: string): string {
+  if (html.includes(SSH_ENTRY_MARKER)) return html;
+  const bodyClose = html.toLowerCase().indexOf('</body>');
+  if (bodyClose < 0) return html;
+  return html.slice(0, bodyClose) + SSH_ENTRY_SCRIPT + html.slice(bodyClose);
 }
 
 function cacheControl(assetsDir: string, filePath: string): string {
