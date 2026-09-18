@@ -23,6 +23,7 @@ export interface SshConnectionStatus {
   readonly error?: string;
   readonly needsPassword?: boolean;
   readonly hostKey?: SshHostKeyDetails;
+  readonly reconnecting?: boolean;
 }
 
 export type SshConnectionSpec = SshConnectionProfileInput;
@@ -81,6 +82,7 @@ export interface SshConnectionManagerOptions {
     Pick<BootstrapOptions, 'readyTimeoutMs' | 'tokenTimeoutMs' | 'pollIntervalMs' | 'sleep'>
   >;
   readonly tunnel?: SshTunnelTuning;
+  readonly reconnectWaitTimeoutMs?: number;
   readonly logger?: (line: string) => void;
 }
 
@@ -93,7 +95,11 @@ interface ManagedConnection {
   needsPassword?: boolean;
   hostKey?: SshHostKeyDetails;
   pending?: Promise<SshConnectionHandle>;
+  reconnecting?: boolean;
+  stateWaiters?: Set<() => void>;
 }
+
+const DEFAULT_RECONNECT_WAIT_TIMEOUT_MS = 30_000;
 
 export function createSshConnectionManager(
   options: SshConnectionManagerOptions = {},
@@ -132,6 +138,7 @@ export function createSshConnectionManager(
       error: entry.error,
       needsPassword: entry.needsPassword,
       hostKey: entry.hostKey,
+      reconnecting: entry.reconnecting,
     };
   };
 
@@ -143,39 +150,97 @@ export function createSshConnectionManager(
     return profile;
   };
 
-  const onTunnelState = (name: string, state: TunnelState, lastError?: string): void => {
-    const entry = active.get(name);
-    if (entry === undefined) return;
+  const wakeWaiters = (entry: ManagedConnection): void => {
+    if (entry.stateWaiters === undefined) return;
+    for (const wake of entry.stateWaiters) wake();
+  };
+
+  const onTunnelState = (
+    name: string,
+    entry: ManagedConnection,
+    state: TunnelState,
+    lastError?: string,
+  ): void => {
+    if (active.get(name) !== entry) return;
     if (state === 'connected') {
       entry.state = 'on';
+      entry.reconnecting = undefined;
       entry.error = undefined;
       entry.hostKey = undefined;
     } else if (state === 'reconnecting') {
       entry.state = 'connecting';
+      entry.reconnecting = true;
     } else if (state === 'failed') {
       entry.state = 'error';
+      entry.reconnecting = undefined;
       entry.error = lastError ?? 'ssh tunnel failed';
       entry.handle = undefined;
     } else if (state === 'stopped' && entry.state !== 'error') {
       entry.state = 'off';
+      entry.reconnecting = undefined;
       entry.handle = undefined;
+    }
+    wakeWaiters(entry);
+  };
+
+  const waitForStateChange = (entry: ManagedConnection, timeoutMs: number): Promise<void> => {
+    let wake: () => void = () => {};
+    const notified = new Promise<void>((resolve) => {
+      wake = () => {
+        entry.stateWaiters?.delete(wake);
+        resolve();
+      };
+      entry.stateWaiters ??= new Set();
+      entry.stateWaiters.add(wake);
+    });
+    const elapsed = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        entry.stateWaiters?.delete(wake);
+        resolve();
+      }, timeoutMs);
+      timer.unref();
+    });
+    return Promise.race([notified, elapsed]);
+  };
+
+  const waitForReconnect = async (
+    name: string,
+    entry: ManagedConnection,
+  ): Promise<SshConnectionHandle | undefined> => {
+    const deadline =
+      Date.now() + (options.reconnectWaitTimeoutMs ?? DEFAULT_RECONNECT_WAIT_TIMEOUT_MS);
+    for (;;) {
+      if (active.get(name) !== entry) return undefined;
+      if (entry.state === 'on' && entry.handle !== undefined) return entry.handle;
+      if (entry.state !== 'connecting') return undefined;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        options.logger?.(`ssh connection "${name}" timed out waiting for the tunnel to reconnect`);
+        return undefined;
+      }
+      await waitForStateChange(entry, remaining);
     }
   };
 
-  const connect = (name: string, options?: SshAuthOptions): Promise<SshConnectionHandle> => {
-    if (closed) {
-      return Promise.reject(new SshRemoteError('unknown', 'ssh connection manager is closed'));
-    }
-    const existing = active.get(name);
-    if (existing?.state === 'on' && existing.handle !== undefined) {
-      return Promise.resolve(existing.handle);
-    }
-    if (existing?.state === 'connecting' && existing.pending !== undefined) {
-      return existing.pending;
-    }
+  const takeOver = async (
+    stale: ManagedConnection | undefined,
+    entry: ManagedConnection,
+  ): Promise<void> => {
+    if (stale === undefined || stale === entry) return;
+    wakeWaiters(stale);
+    await stale.tunnel?.disconnect().catch(() => {});
+    await stale.client?.disconnect().catch(() => {});
+  };
+
+  const startEstablish = (
+    name: string,
+    connectOptions: SshAuthOptions | undefined,
+    stale: ManagedConnection | undefined,
+  ): Promise<SshConnectionHandle> => {
     const entry: ManagedConnection = { state: 'connecting' };
     active.set(name, entry);
-    const pending = establish(name, entry, normalizeAuth(options))
+    const pending = takeOver(stale, entry)
+      .then(() => establish(name, entry, normalizeAuth(connectOptions)))
       .catch((error: unknown) => {
         entry.state = 'error';
         entry.error = errorMessage(error);
@@ -189,6 +254,30 @@ export function createSshConnectionManager(
     entry.pending = pending;
     void pending.catch(() => {});
     return pending;
+  };
+
+  const connect = (name: string, options?: SshAuthOptions): Promise<SshConnectionHandle> => {
+    if (closed) {
+      return Promise.reject(new SshRemoteError('unknown', 'ssh connection manager is closed'));
+    }
+    const existing = active.get(name);
+    if (existing?.state === 'on' && existing.handle !== undefined) {
+      return Promise.resolve(existing.handle);
+    }
+    if (existing?.state === 'connecting' && existing.pending !== undefined) {
+      return existing.pending;
+    }
+    if (existing?.state === 'connecting') {
+      return waitForReconnect(name, existing).then((handle) => {
+        if (handle !== undefined) return handle;
+        const current = active.get(name);
+        if (current !== undefined && current !== existing) {
+          return connect(name, options);
+        }
+        return startEstablish(name, options, existing);
+      });
+    }
+    return startEstablish(name, options, existing);
   };
 
   const establish = async (
@@ -216,7 +305,7 @@ export function createSshConnectionManager(
         ...options.tunnel,
         onStateChange: (status) => {
           options.tunnel?.onStateChange?.(status);
-          onTunnelState(name, status.state, status.lastError);
+          onTunnelState(name, entry, status.state, status.lastError);
         },
       });
       entry.tunnel = tunnel;
@@ -253,6 +342,7 @@ export function createSshConnectionManager(
     const entry = active.get(name);
     if (entry === undefined) return;
     active.delete(name);
+    wakeWaiters(entry);
     await entry.tunnel?.disconnect();
     await entry.client?.disconnect().catch(() => {});
   };

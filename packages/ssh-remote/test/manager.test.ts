@@ -47,11 +47,13 @@ function makeManager(
   sleep?: (ms: number) => Promise<void>,
   tunnelOverrides: Record<string, unknown> = {},
   homeDir?: string,
+  reconnectWaitTimeoutMs?: number,
 ) {
   let nextPort = port;
   return createSshConnectionManager({
     homeDir: homeDir ?? makeHome(),
     runner,
+    reconnectWaitTimeoutMs,
     tunnel: {
       pickFreePort: async () => nextPort++,
       probeLocalPort: async () => true,
@@ -191,6 +193,106 @@ describe('SshConnectionManager', () => {
       expect(manager.status('devbox').state).toBe('on');
     });
     expect(runner.spawns).toHaveLength(2);
+    await manager.close();
+  });
+
+  it('waits for an in-progress tunnel reconnect and reuses the handle', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    let releaseBackoff: (() => void) | undefined;
+    const gatedSleep = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        releaseBackoff = resolve;
+      });
+    };
+    const manager = makeManager(runner, 49160, gatedSleep);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const handle = await manager.connect('devbox');
+    runner.spawns[0]?.resolveExit({ code: 255, signal: null });
+    await vi.waitFor(() => {
+      expect(manager.status('devbox')).toMatchObject({ state: 'connecting', reconnecting: true });
+    });
+    const bootstrapRuns = () =>
+      runner.runs.filter((run) => (run.argv.at(-1) ?? '').includes('uname -s')).length;
+    const runsBefore = bootstrapRuns();
+    const first = manager.connect('devbox');
+    const second = manager.connect('devbox');
+    const settled = await Promise.race([
+      first.then(() => 'settled'),
+      new Promise((resolve) => setTimeout(resolve, 20)).then(() => 'waiting'),
+    ]);
+    expect(settled).toBe('waiting');
+    expect(bootstrapRuns()).toBe(runsBefore);
+    expect(runner.spawns).toHaveLength(1);
+    releaseBackoff?.();
+    await expect(first).resolves.toBe(handle);
+    await expect(second).resolves.toBe(handle);
+    expect(manager.status('devbox').state).toBe('on');
+    expect(manager.status('devbox').reconnecting).toBeUndefined();
+    expect(runner.spawns).toHaveLength(2);
+    await manager.close();
+  });
+
+  it('times out waiting for reconnect, stops the old tunnel, and establishes a fresh one', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    const backoffResolvers: Array<() => void> = [];
+    const gatedSleep = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        backoffResolvers.push(resolve);
+      });
+    };
+    const manager = makeManager(runner, 49160, gatedSleep, {}, undefined, 10);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox');
+    runner.spawns[0]?.resolveExit({ code: 255, signal: null });
+    await vi.waitFor(() => {
+      expect(manager.status('devbox').state).toBe('connecting');
+    });
+    const handle = await manager.connect('devbox');
+    expect(handle.localOrigin).toBe('http://127.0.0.1:49161');
+    expect(manager.status('devbox').state).toBe('on');
+    expect(runner.spawns).toHaveLength(2);
+    expect(exitRuns(runner)).toHaveLength(1);
+    for (const release of backoffResolvers) release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runner.spawns).toHaveLength(2);
+    await manager.close();
+  });
+
+  it('falls back to a fresh establish and reports error when the tunnel reconnect fails', async () => {
+    const runner = new FakeProcessRunner();
+    scriptHealthyRemote(runner);
+    let probing = true;
+    let releaseBackoff: (() => void) | undefined;
+    const gatedSleep = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        releaseBackoff = resolve;
+      });
+    };
+    const manager = makeManager(runner, 49160, gatedSleep, {
+      probeLocalPort: async () => probing,
+      readyTimeoutMs: 0,
+      maxReconnectAttempts: 1,
+    });
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    await manager.connect('devbox');
+    probing = false;
+    runner.spawns[0]?.resolveExit({ code: 255, signal: null });
+    await vi.waitFor(() => {
+      expect(manager.status('devbox').state).toBe('connecting');
+    });
+    const pending = manager.connect('devbox');
+    releaseBackoff?.();
+    await expect(pending).rejects.toThrow(SshRemoteError);
+    const status = manager.status('devbox');
+    expect(status.state).toBe('error');
+    expect(status.error).toBeDefined();
+    expect(status.reconnecting).toBeUndefined();
+    probing = true;
+    const handle = await manager.connect('devbox');
+    expect(handle.localOrigin).toBeDefined();
+    expect(manager.status('devbox').state).toBe('on');
     await manager.close();
   });
 
