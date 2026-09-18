@@ -3,6 +3,7 @@ import {
   type SshAuthOptions,
   type SshConnectionInfo,
   type SshConnectionManager,
+  type SshHostKeyDetails,
   type SshTestResult,
 } from '@moonshot-ai/ssh-remote';
 
@@ -78,27 +79,6 @@ interface MappedSshError {
   readonly code: ErrorCode;
   readonly msg: string;
   readonly details?: SshHostKeyDetailsWire;
-}
-
-interface SshHostKeyDetails {
-  readonly host: string;
-  readonly port: number;
-  readonly fingerprint?: string;
-  readonly keyType?: string;
-  readonly expectedFingerprint?: string;
-  readonly knownHostsFile?: string;
-  readonly knownHostsLine?: number;
-}
-
-interface SshHostKeyScanResult {
-  readonly host: string;
-  readonly port: number;
-  readonly keys: readonly { readonly keyType: string; readonly fingerprint: string }[];
-}
-
-interface SshHostKeyCapableManager {
-  scanHostKey(name: string): Promise<SshHostKeyScanResult>;
-  forgetHostKey(name: string): Promise<void>;
 }
 
 export function registerSshConnectionsRoutes(
@@ -358,15 +338,14 @@ export function registerSshConnectionsRoutes(
       const body = authOptionsOf(req.body);
       try {
         const result = await opts.service.test(name, body);
-        const hostKey = testHostKeyOf(result);
-        if (hostKey !== undefined) {
+        if (!result.ok && result.hostKey !== undefined) {
           reply.send(
             errEnvelope(
               ErrorCode.SSH_HOST_KEY_CHANGED,
               result.error ?? `host key for connection "${name}" has changed`,
               req.id,
               undefined,
-              toHostKeyDetailsWire(hostKey),
+              toHostKeyDetailsWire(result.hostKey),
             ),
           );
           return;
@@ -523,19 +502,8 @@ export function registerSshConnectionsRoutes(
     },
     async (req, reply) => {
       const { name } = req.params as { name: string };
-      const hostKeys = hostKeyCapableOf(opts.service);
-      if (hostKeys === undefined) {
-        reply.send(
-          errEnvelope(
-            ErrorCode.INTERNAL_ERROR,
-            'ssh host key management is not available',
-            req.id,
-          ),
-        );
-        return;
-      }
       try {
-        const scan = await hostKeys.scanHostKey(name);
+        const scan = await opts.service.scanHostKey(name);
         const response: SshHostKeyScanResponse = {
           name,
           host: scan.host,
@@ -570,19 +538,8 @@ export function registerSshConnectionsRoutes(
     },
     async (req, reply) => {
       const { name } = req.params as { name: string };
-      const hostKeys = hostKeyCapableOf(opts.service);
-      if (hostKeys === undefined) {
-        reply.send(
-          errEnvelope(
-            ErrorCode.INTERNAL_ERROR,
-            'ssh host key management is not available',
-            req.id,
-          ),
-        );
-        return;
-      }
       try {
-        await hostKeys.forgetHostKey(name);
+        await opts.service.forgetHostKey(name);
         reply.send(okEnvelope({ name, forgotten: true }, req.id));
       } catch (error) {
         sendSshError(reply, req, error);
@@ -612,7 +569,6 @@ function authOptionsOf(body: unknown): SshAuthOptions | undefined {
 }
 
 function toWire(info: SshConnectionInfo): SshConnectionWire {
-  const hostKey = statusHostKeyOf(info.status);
   return {
     name: info.name,
     host: info.host,
@@ -625,7 +581,8 @@ function toWire(info: SshConnectionInfo): SshConnectionWire {
       local_origin: info.status.localOrigin,
       error: info.status.error,
       needs_password: info.status.needsPassword,
-      host_key: hostKey === undefined ? undefined : toHostKeyDetailsWire(hostKey),
+      host_key:
+        info.status.hostKey === undefined ? undefined : toHostKeyDetailsWire(info.status.hostKey),
     },
   };
 }
@@ -639,35 +596,6 @@ function toTestWire(result: SshTestResult): SshConnectionTestResultWire {
     error: result.error,
     needs_password: result.needsPassword,
   };
-}
-
-function hostKeyCapableOf(service: SshConnectionManager): SshHostKeyCapableManager | undefined {
-  const candidate = service as SshConnectionManager & Partial<SshHostKeyCapableManager>;
-  if (
-    typeof candidate.scanHostKey !== 'function' ||
-    typeof candidate.forgetHostKey !== 'function'
-  ) {
-    return undefined;
-  }
-  return candidate as SshHostKeyCapableManager;
-}
-
-function isHostKeyChangedError(error: SshRemoteError): boolean {
-  const kind: string = error.kind;
-  return kind === 'host-key-changed';
-}
-
-function errorHostKeyOf(error: SshRemoteError): SshHostKeyDetails | undefined {
-  return (error as SshRemoteError & { hostKey?: SshHostKeyDetails }).hostKey;
-}
-
-function testHostKeyOf(result: SshTestResult): SshHostKeyDetails | undefined {
-  if (result.ok) return undefined;
-  return (result as SshTestResult & { hostKey?: SshHostKeyDetails }).hostKey;
-}
-
-function statusHostKeyOf(status: SshConnectionInfo['status']): SshHostKeyDetails | undefined {
-  return (status as SshConnectionInfo['status'] & { hostKey?: SshHostKeyDetails }).hostKey;
 }
 
 function toHostKeyDetailsWire(details: SshHostKeyDetails): SshHostKeyDetailsWire {
@@ -686,9 +614,9 @@ function mapSshError(error: unknown): MappedSshError | undefined {
   if (!(error instanceof SshRemoteError)) {
     return undefined;
   }
-  if (isHostKeyChangedError(error)) {
-    const hostKey = errorHostKeyOf(error);
-    const details = hostKey === undefined ? undefined : toHostKeyDetailsWire(hostKey);
+  if (error.kind === 'host-key-changed') {
+    const details =
+      error.hostKey === undefined ? undefined : toHostKeyDetailsWire(error.hostKey);
     return { code: ErrorCode.SSH_HOST_KEY_CHANGED, msg: error.message, details };
   }
   if (error.kind === 'config') {

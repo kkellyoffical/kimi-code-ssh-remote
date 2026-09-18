@@ -7,25 +7,10 @@ import {
   type SshConnectionManager,
   type SshConnectionSpec,
   type SshConnectionStatus,
-  type SshErrorKind,
+  type SshHostKeyDetails,
+  type SshHostKeyScan,
   type SshTestResult,
 } from '@moonshot-ai/ssh-remote';
-
-export interface FakeHostKeyDetails {
-  readonly host: string;
-  readonly port: number;
-  readonly fingerprint?: string;
-  readonly keyType?: string;
-  readonly expectedFingerprint?: string;
-  readonly knownHostsFile?: string;
-  readonly knownHostsLine?: number;
-}
-
-export interface FakeHostKeyScan {
-  readonly host: string;
-  readonly port: number;
-  readonly keys: readonly { readonly keyType: string; readonly fingerprint: string }[];
-}
 
 export interface FakeSshConnectionManager extends SshConnectionManager {
   readonly connectCalls: string[];
@@ -34,11 +19,9 @@ export interface FakeSshConnectionManager extends SshConnectionManager {
   setHandle(name: string, handle: SshConnectionHandle | undefined): void;
   setConnectError(name: string, error: Error | undefined): void;
   setAuthRequired(name: string, required: boolean): void;
-  setHostKeyChanged(name: string, details: FakeHostKeyDetails | undefined): void;
-  setHostKeyScan(name: string, scan: FakeHostKeyScan | undefined): void;
+  setHostKeyChanged(name: string, details: SshHostKeyDetails | undefined): void;
+  setHostKeyScan(name: string, scan: SshHostKeyScan | undefined): void;
   savedPassword(name: string): string | undefined;
-  scanHostKey(name: string): Promise<FakeHostKeyScan>;
-  forgetHostKey(name: string): Promise<void>;
 }
 
 export interface FakeSshConnectionManagerOptions {
@@ -60,20 +43,19 @@ interface FakeEntry {
   authRequired: boolean;
   password?: string;
   needsPassword: boolean;
-  hostKeyChanged?: FakeHostKeyDetails;
-  hostKeyScan?: FakeHostKeyScan;
+  hostKeyChanged?: SshHostKeyDetails;
+  hostKeyScan?: SshHostKeyScan;
 }
 
-function hostKeyChangedError(details: FakeHostKeyDetails): SshRemoteError {
-  const kind = 'host-key-changed' as unknown as SshErrorKind;
-  const error = new SshRemoteError(
-    kind,
+function hostKeyChangedError(details: SshHostKeyDetails): SshRemoteError {
+  return new SshRemoteError(
+    'host-key-changed',
     `host key for ${details.host}:${details.port} has changed`,
+    { hostKey: details },
   );
-  return Object.assign(error, { hostKey: details });
 }
 
-function defaultHostKeyScan(entry: FakeEntry): FakeHostKeyScan {
+function defaultHostKeyScan(entry: FakeEntry): SshHostKeyScan {
   return {
     host: entry.spec.host,
     port: entry.spec.port,
@@ -96,7 +78,7 @@ export function fakeSshConnectionManager(
         state: 'off',
         needsPassword: entry?.needsPassword === true ? true : undefined,
         hostKey: entry?.hostKeyChanged,
-      } as SshConnectionStatus;
+      };
     }
     return {
       state: 'on',
@@ -190,17 +172,6 @@ export function fakeSshConnectionManager(
       const entry = requireEntry(name);
       entry.password = undefined;
     },
-    async scanHostKey(name: string) {
-      const entry = requireEntry(name);
-      return {
-        host: entry.spec.host,
-        port: entry.spec.port,
-        keys: [],
-      };
-    },
-    async forgetHostKey(name: string) {
-      requireEntry(name);
-    },
     async test(name: string, options?: SshAuthOptions): Promise<SshTestResult> {
       const entry = requireEntry(name);
       if (entry.hostKeyChanged !== undefined) {
@@ -209,7 +180,7 @@ export function fakeSshConnectionManager(
           ok: false,
           error: `host key for ${details.host}:${details.port} has changed`,
           hostKey: details,
-        } as SshTestResult;
+        };
       }
       if (entry.authRequired && passwordFor(entry, options) === undefined) {
         return { ok: false, error: 'ssh authentication failed: permission denied', needsPassword: true };
@@ -248,7 +219,7 @@ export function fakeSshConnectionManager(
       entry.state = 'off';
       entry.handle = undefined;
     },
-    async scanHostKey(name: string): Promise<FakeHostKeyScan> {
+    async scanHostKey(name: string): Promise<SshHostKeyScan> {
       const entry = requireEntry(name);
       return entry.hostKeyScan ?? defaultHostKeyScan(entry);
     },
