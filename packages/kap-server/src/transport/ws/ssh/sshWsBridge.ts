@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 
 import { SshRemoteError, type SshConnectionManager } from '@moonshot-ai/ssh-remote';
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer, type RawData } from 'ws';
 
 import { selectWsBearerProtocol } from '../bearerProtocol';
 
@@ -23,6 +23,12 @@ export interface SshWsBridgeOptions {
   readonly handshakeTimeoutMs?: number;
 }
 
+interface UpstreamConnection {
+  readonly socket: WebSocket;
+  readonly early: [RawData, boolean][];
+  release(): void;
+}
+
 export function createSshWsBridge(opts: SshWsBridgeOptions): SshWsBridge {
   const wss = new WebSocketServer({ noServer: true, handleProtocols: selectWsBearerProtocol });
 
@@ -41,7 +47,7 @@ export function createSshWsBridge(opts: SshWsBridgeOptions): SshWsBridge {
       writeUpgradeError(socket, notFound ? 404 : 502);
       return;
     }
-    let upstream: WebSocket;
+    let upstream: UpstreamConnection;
     try {
       upstream = await connectUpstream(
         handle.localOrigin,
@@ -54,7 +60,11 @@ export function createSshWsBridge(opts: SshWsBridgeOptions): SshWsBridge {
       return;
     }
     wss.handleUpgrade(req, socket, head, (client) => {
-      bridgeSockets(client, upstream);
+      bridgeSockets(client, upstream.socket);
+      for (const [data, isBinary] of upstream.early) {
+        if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+      }
+      upstream.release();
     });
   };
 
@@ -72,7 +82,7 @@ async function connectUpstream(
   version: '1' | '3',
   token: string,
   handshakeTimeoutMs: number,
-): Promise<WebSocket> {
+): Promise<UpstreamConnection> {
   const url = `${localOrigin.replace(/^http/, 'ws')}/api/v${version}/ws`;
   const protocol = `kimi-code.bearer.${token}`;
   if (isWebSocketProtocolToken(protocol)) {
@@ -94,9 +104,14 @@ function connectUpstreamAttempt(
   protocols: string[] | undefined,
   headers: Record<string, string>,
   handshakeTimeoutMs: number,
-): Promise<WebSocket> {
+): Promise<UpstreamConnection> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url, protocols, { headers, handshakeTimeout: handshakeTimeoutMs });
+    const early: [RawData, boolean][] = [];
+    let bridging = false;
+    socket.on('message', (data, isBinary) => {
+      if (!bridging) early.push([data, isBinary]);
+    });
     let settled = false;
     const cleanup = (): void => {
       socket.off('open', onOpen);
@@ -107,8 +122,15 @@ function connectUpstreamAttempt(
       if (settled) return;
       settled = true;
       cleanup();
-      if (error === undefined) resolve(socket);
-      else reject(error);
+      if (error === undefined) {
+        resolve({
+          socket,
+          early,
+          release: () => {
+            bridging = true;
+          },
+        });
+      } else reject(error);
     };
     const onOpen = (): void => finish();
     const onError = (error: Error): void => finish(error);
