@@ -6,12 +6,8 @@ import {
   type BootstrapOptions,
   type RemotePlatform,
 } from './bootstrap';
-import { SshRemoteError, errorMessage, isNeedsPasswordError } from './errors';
-import {
-  forgetRemoteHostKey,
-  scanRemoteHostKey,
-  type ScannedHostKey,
-} from './hostkeys';
+import { SshRemoteError, errorMessage, isNeedsPasswordError, type SshHostKeyDetails } from './errors';
+import { forgetRemoteHostKey, scanRemoteHostKey, type SshHostKeyScan } from './hostkeys';
 import { resolveKimiHome, type SshConnectionProfile, type SshConnectionProfileInput } from './profile';
 import { createSystemProcessRunner, type ProcessRunner } from './runner';
 import { SecretsStore } from './secrets';
@@ -26,6 +22,7 @@ export interface SshConnectionStatus {
   readonly localOrigin?: string;
   readonly error?: string;
   readonly needsPassword?: boolean;
+  readonly hostKey?: SshHostKeyDetails;
 }
 
 export type SshConnectionSpec = SshConnectionProfileInput;
@@ -53,6 +50,7 @@ export interface SshTestResult {
   readonly serverRunning?: boolean;
   readonly error?: string;
   readonly needsPassword?: boolean;
+  readonly hostKey?: SshHostKeyDetails;
 }
 
 export interface SshConnectionHandle {
@@ -66,7 +64,7 @@ export interface SshConnectionManager {
   remove(name: string): Promise<void>;
   setPassword(name: string, password: string): Promise<void>;
   clearPassword(name: string): Promise<void>;
-  scanHostKey(name: string): Promise<ScannedHostKey[]>;
+  scanHostKey(name: string): Promise<SshHostKeyScan>;
   forgetHostKey(name: string): Promise<void>;
   test(name: string, options?: SshAuthOptions): Promise<SshTestResult>;
   connect(name: string, options?: SshAuthOptions): Promise<SshConnectionHandle>;
@@ -93,6 +91,7 @@ interface ManagedConnection {
   handle?: SshConnectionHandle;
   error?: string;
   needsPassword?: boolean;
+  hostKey?: SshHostKeyDetails;
   pending?: Promise<SshConnectionHandle>;
 }
 
@@ -132,6 +131,7 @@ export function createSshConnectionManager(
       localOrigin: entry.handle?.localOrigin,
       error: entry.error,
       needsPassword: entry.needsPassword,
+      hostKey: entry.hostKey,
     };
   };
 
@@ -149,6 +149,7 @@ export function createSshConnectionManager(
     if (state === 'connected') {
       entry.state = 'on';
       entry.error = undefined;
+      entry.hostKey = undefined;
     } else if (state === 'reconnecting') {
       entry.state = 'connecting';
     } else if (state === 'failed') {
@@ -179,6 +180,7 @@ export function createSshConnectionManager(
         entry.state = 'error';
         entry.error = errorMessage(error);
         entry.needsPassword = isNeedsPasswordError(error);
+        entry.hostKey = error instanceof SshRemoteError ? error.hostKey : undefined;
         throw error;
       })
       .finally(() => {
@@ -239,6 +241,7 @@ export function createSshConnectionManager(
       entry.state = 'on';
       entry.error = undefined;
       entry.needsPassword = undefined;
+      entry.hostKey = undefined;
       return handle;
     } catch (error) {
       await client.disconnect().catch(() => {});
@@ -329,6 +332,7 @@ export function createSshConnectionManager(
           ok: false,
           error: errorMessage(error),
           needsPassword: isNeedsPasswordError(error) ? true : undefined,
+          hostKey: error instanceof SshRemoteError ? error.hostKey : undefined,
         };
       } finally {
         if (reusable === undefined) {

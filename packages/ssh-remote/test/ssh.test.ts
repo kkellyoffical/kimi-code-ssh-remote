@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -288,13 +289,42 @@ describe('SshClient host key verification', () => {
     expect(error).toBeInstanceOf(SshRemoteError);
     const sshError = error as SshRemoteError;
     expect(sshError.kind).toBe('host-key-changed');
-    expect(sshError.offendingHostKey).toEqual({
-      file: '/home/alice/.ssh/known_hosts',
-      line: 17,
+    expect(sshError.hostKey).toEqual({
+      host: 'dev.example.com',
+      port: 2222,
+      fingerprint: 'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+      keyType: 'ssh-ed25519',
+      expectedFingerprint: undefined,
+      knownHostsFile: '/home/alice/.ssh/known_hosts',
+      knownHostsLine: 17,
     });
     expect(sshError.message).toContain('ssh-keygen -R [dev.example.com]:2222');
     expect(sshError.message).toContain('/home/alice/.ssh/known_hosts:17');
     expect(sshError.needsPassword).toBe(false);
+  });
+
+  it('reads the stored fingerprint from the offending known_hosts line', async () => {
+    const dir = makeControlDir();
+    const knownHosts = join(dir, 'known_hosts');
+    const blob = Buffer.from('stored-key-blob').toString('base64');
+    const lines = Array.from({ length: 16 }, () => '# filler');
+    lines.push(`dev.example.com ssh-ed25519 ${blob}`);
+    writeFileSync(knownHosts, `${lines.join('\n')}\n`, { mode: 0o600 });
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = {
+      ...CHANGED_KEY,
+      stderr: CHANGED_KEY.stderr.replace('/home/alice/.ssh/known_hosts', knownHosts),
+    };
+    const client = makeClient(runner);
+    const error: unknown = await client.connect().catch((error) => error);
+    const expected = `SHA256:${createHash('sha256')
+      .update(Buffer.from(blob, 'base64'))
+      .digest('base64')
+      .replace(/=+$/, '')}`;
+    expect((error as SshRemoteError).hostKey?.expectedFingerprint).toBe(expected);
+    expect((error as SshRemoteError).hostKey?.fingerprint).toBe(
+      'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+    );
   });
 
   it('never retries a changed host key through askpass, even with a password', async () => {

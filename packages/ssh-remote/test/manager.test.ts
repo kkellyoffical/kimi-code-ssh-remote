@@ -472,9 +472,11 @@ describe('SshConnectionManager', () => {
     const manager = makeManager(runner);
     await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice', port: 2222 });
     const keys = await manager.scanHostKey('devbox');
-    expect(keys).toEqual([
-      { host: 'dev.example.com', keyType: 'ssh-ed25519', fingerprint: expectedFingerprint },
-    ]);
+    expect(keys).toEqual({
+      host: 'dev.example.com',
+      port: 2222,
+      keys: [{ keyType: 'ssh-ed25519', fingerprint: expectedFingerprint }],
+    });
     expect(runner.lastRun().argv).toEqual([
       'ssh-keyscan',
       '-T',
@@ -520,16 +522,48 @@ describe('SshConnectionManager', () => {
     expect((error as SshRemoteError).message).toContain('dev.example.com');
     await manager.close();
   });
+
+  it('exposes host key details from test() and status() when the host key changed', async () => {
+    const runner = new FakeProcessRunner();
+    runner.defaultResult = {
+      code: 255,
+      stdout: '',
+      stderr: [
+        'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!',
+        'The fingerprint for the ED25519 key sent by the remote host is',
+        'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+        'Offending ED25519 key in /home/alice/.ssh/known_hosts:17',
+        'Host key verification failed.',
+      ].join('\n'),
+    };
+    const manager = makeManager(runner);
+    await manager.add({ name: 'devbox', host: 'dev.example.com', user: 'alice' });
+    const result = await manager.test('devbox');
+    expect(result.ok).toBe(false);
+    expect(result.hostKey).toMatchObject({
+      host: 'dev.example.com',
+      port: 22,
+      fingerprint: 'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.',
+      keyType: 'ssh-ed25519',
+      knownHostsFile: '/home/alice/.ssh/known_hosts',
+      knownHostsLine: 17,
+    });
+    expect(result.error).toContain('ssh-keygen -R dev.example.com');
+    await manager.connect('devbox').catch(() => {});
+    const status = manager.status('devbox');
+    expect(status.state).toBe('error');
+    expect(status.hostKey?.fingerprint).toBe('SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s.');
+    await manager.close();
+  });
 });
 
 describe('parseHostKeyScan', () => {
-  it('skips comments and blank lines and keeps the first host of a line', () => {
+  it('skips comments and blank lines and parses key type and fingerprint', () => {
     const blob = Buffer.from('key-blob').toString('base64');
     const keys = parseHostKeyScan(
       `# banner\n\nexample.com,203.0.113.10 ssh-ed25519 ${blob}\ngarbage\n`,
     );
     expect(keys).toHaveLength(1);
-    expect(keys[0]?.host).toBe('example.com');
     expect(keys[0]?.keyType).toBe('ssh-ed25519');
     expect(keys[0]?.fingerprint.startsWith('SHA256:')).toBe(true);
   });

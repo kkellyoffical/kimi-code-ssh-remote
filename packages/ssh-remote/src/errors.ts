@@ -8,9 +8,14 @@ export type SshErrorKind =
   | 'config'
   | 'unknown';
 
-export interface OffendingHostKey {
-  readonly file: string;
-  readonly line: number;
+export interface SshHostKeyDetails {
+  readonly host: string;
+  readonly port: number;
+  readonly fingerprint?: string;
+  readonly keyType?: string;
+  readonly expectedFingerprint?: string;
+  readonly knownHostsFile?: string;
+  readonly knownHostsLine?: number;
 }
 
 export class SshRemoteError extends Error {
@@ -21,19 +26,19 @@ export class SshRemoteError extends Error {
       stderr?: string;
       cause?: unknown;
       needsPassword?: boolean;
-      offendingHostKey?: OffendingHostKey;
+      hostKey?: SshHostKeyDetails;
     },
   ) {
     super(message, { cause: options?.cause });
     this.name = 'SshRemoteError';
     this.stderr = options?.stderr;
     this.needsPassword = options?.needsPassword ?? false;
-    this.offendingHostKey = options?.offendingHostKey;
+    this.hostKey = options?.hostKey;
   }
 
   readonly stderr?: string;
   readonly needsPassword: boolean;
-  readonly offendingHostKey?: OffendingHostKey;
+  readonly hostKey?: SshHostKeyDetails;
 }
 
 export function isNeedsPasswordError(error: unknown): boolean {

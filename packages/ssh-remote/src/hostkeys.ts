@@ -1,13 +1,19 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 import { SshRemoteError } from './errors';
 import { DEFAULT_SSH_PORT, type SshConnectionProfile } from './profile';
 import type { ProcessRunner } from './runner';
 
 export interface ScannedHostKey {
-  readonly host: string;
   readonly keyType: string;
   readonly fingerprint: string;
+}
+
+export interface SshHostKeyScan {
+  readonly host: string;
+  readonly port: number;
+  readonly keys: readonly ScannedHostKey[];
 }
 
 const SCAN_TIMEOUT_SECONDS = 10;
@@ -21,21 +27,37 @@ export function parseHostKeyScan(stdout: string): ScannedHostKey[] {
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
-    const [hostField, keyType, blob] = trimmed.split(/\s+/);
-    if (hostField === undefined || keyType === undefined || blob === undefined) continue;
-    keys.push({
-      host: hostField.split(',')[0] ?? hostField,
-      keyType,
-      fingerprint: fingerprintOf(blob),
-    });
+    const fields = trimmed.split(/\s+/);
+    const typeIndex = fields.findIndex((field) => isKeyTypeField(field));
+    const blob = typeIndex >= 0 ? fields[typeIndex + 1] : undefined;
+    if (typeIndex < 0 || blob === undefined) continue;
+    keys.push({ keyType: fields[typeIndex] ?? '', fingerprint: fingerprintOf(blob) });
   }
   return keys;
+}
+
+export async function readStoredHostKeyFingerprint(
+  knownHostsFile: string,
+  line: number,
+): Promise<string | undefined> {
+  try {
+    const content = await readFile(knownHostsFile, 'utf8');
+    const entry = content.split('\n')[line - 1]?.trim();
+    if (entry === undefined || entry.length === 0 || entry.startsWith('#')) return undefined;
+    const fields = entry.split(/\s+/);
+    const typeIndex = fields.findIndex((field) => isKeyTypeField(field));
+    const blob = typeIndex >= 0 ? fields[typeIndex + 1] : undefined;
+    if (typeIndex < 0 || blob === undefined) return undefined;
+    return fingerprintOf(blob);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function scanRemoteHostKey(
   profile: SshConnectionProfile,
   runner: ProcessRunner,
-): Promise<ScannedHostKey[]> {
+): Promise<SshHostKeyScan> {
   const target = knownHostsTarget(profile.host, profile.port);
   const result = await runner.run(
     ['ssh-keyscan', '-T', String(SCAN_TIMEOUT_SECONDS), '-p', String(profile.port), profile.host],
@@ -50,7 +72,7 @@ export async function scanRemoteHostKey(
       { stderr: result.stderr },
     );
   }
-  return keys;
+  return { host: profile.host, port: profile.port, keys };
 }
 
 export async function forgetRemoteHostKey(
@@ -67,6 +89,10 @@ export async function forgetRemoteHostKey(
       { stderr: result.stderr },
     );
   }
+}
+
+function isKeyTypeField(field: string): boolean {
+  return /^(ssh-|ecdsa-|sk-)/.test(field);
 }
 
 function fingerprintOf(blob: string): string {
