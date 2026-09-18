@@ -11,11 +11,17 @@
  *   kimi ssh passwd <name>         save a password (hidden prompt) or --clear it
  *   kimi ssh test <name>           probe connectivity and the remote setup
  *   kimi ssh connect <name>        establish the tunnel and print the web URL
+ *   kimi ssh host-key <name>       show the remote's host key fingerprint, or
+ *                                  --forget the stored one after a key change
  *
  * Passwords are only ever collected through a hidden-echo prompt — never as
  * command-line values. `test`/`connect` try public-key auth first and, on a
  * needs-password failure, prompt for a password (offering to save it) and
  * retry once when interactive; otherwise they fail with an actionable error.
+ * Host keys are trusted on first contact (StrictHostKeyChecking=accept-new);
+ * when a remote's key changes, `test`/`connect` print the stored-vs-presented
+ * fingerprint comparison and — interactive only — offer to forget the old key
+ * and retry, while non-interactive runs fail with the forget command.
  */
 
 import type { Command } from 'commander';
@@ -24,12 +30,14 @@ import { sshErrorHint } from './format';
 import {
   handleSshAdd,
   handleSshConnect,
+  handleSshHostKey,
   handleSshList,
   handleSshPasswd,
   handleSshRemove,
   handleSshTest,
   type SshAddOptions,
   type SshConnectOptions,
+  type SshHostKeyOptions,
   type SshPasswdOptions,
   type SshTestOptions,
 } from './run';
@@ -124,6 +132,19 @@ export function registerSshCommand(program: Command): void {
     .action((name: string, opts: Omit<SshConnectOptions, 'name'>) => {
       runAction(async () => {
         await handleSshConnect({ name, ...opts });
+      });
+    });
+
+  ssh
+    .command('host-key')
+    .description(
+      "Show the host key fingerprint the remote currently presents, or --forget the stored key after a host key change.",
+    )
+    .argument('<name>', 'connection name')
+    .option('--forget', 'remove the stored host key so the next connection re-trusts', false)
+    .action((name: string, opts: Omit<SshHostKeyOptions, 'name'>) => {
+      runAction(async () => {
+        await handleSshHostKey({ name, ...opts });
       });
     });
 }
