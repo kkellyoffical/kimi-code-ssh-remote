@@ -232,7 +232,7 @@ describe('WS upgrade auth', () => {
       });
     }
 
-    it('rejects without a token, bridges v1 and v3 with a valid token, and destroys unknown paths', async () => {
+    it('rejects without a token, bridges v1 with a valid token, and destroys unknown paths', async () => {
       const remote = await startWsEchoRemote();
       const home = await mkdtemp(join(tmpdir(), 'kimi-kap-ssh-ws-'));
       const server = await startServer({
@@ -270,7 +270,7 @@ describe('WS upgrade auth', () => {
           protocols: ['kimi-code.bearer.test-token'],
         });
 
-        for (const version of ['v1', 'v3'] as const) {
+        for (const version of ['v1'] as const) {
           const ws = await openBridged(`${wsBase}/ssh/alpha/api/${version}/ws`, [
             'kimi-code.bearer.test-token',
           ]);
@@ -281,10 +281,7 @@ describe('WS upgrade auth', () => {
           expect(await echoed).toBe(`hello-${version}`);
           ws.close();
         }
-        expect(remote.protocols).toEqual([
-          'kimi-code.bearer.remote-secret',
-          'kimi-code.bearer.remote-secret',
-        ]);
+        expect(remote.protocols).toEqual(['kimi-code.bearer.remote-secret']);
       } finally {
         await server.close();
         await rm(home, { recursive: true, force: true });

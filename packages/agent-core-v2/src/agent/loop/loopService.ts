@@ -31,6 +31,7 @@ import { OrderedHookSlot } from '#/hooks';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { isVacuousContentPart } from '#/agent/contextMemory/vacuousContent';
+import { markInTurnOrigin } from '#/agent/contextMemory/conversationTime';
 import { newMessageId } from '#/agent/contextMemory/messageId';
 import { type ContextMessage, type PromptOrigin } from '#/agent/contextMemory/types';
 import { gateImageFormatParts } from '#/agent/media/image-compress';
@@ -1239,7 +1240,11 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       nudge.consumed = true;
       if (nudge.contextMessage !== undefined && nudge.contextMessage.content.length > 0) {
         this.materializeMessage(nudge.contextMessage);
-        if (nudge.promptIds !== undefined && nudge.promptIds.length > 0) {
+        if (
+          nudge.promptIds !== undefined &&
+          nudge.promptIds.length > 0 &&
+          nudge.contextMessage.id !== this.active?.prompt.message.id
+        ) {
           void this.dispatcher.dispatch(
             new TurnSteer({
               agentId: this.scopeContext.agentId,
@@ -1332,14 +1337,14 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
           merged.content,
           this.profile.getModelProviderType(),
         );
-        const messageId = newMessageId();
+        const messageId = children.length === 1 ? children[0]!.waiter.id : newMessageId();
         const promptIds = children.map((child) => child.waiter.id);
         this.nudges.push({
           contextMessage: {
             role: 'user',
             content: gatedContent,
             toolCalls: [],
-            origin: merged.origin,
+            origin: markInTurnOrigin(merged.origin),
             id: messageId,
           },
           promptIds,
@@ -1425,6 +1430,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
               encrypted: delta.encrypted,
               detailsIndex: delta.detailsIndex,
               hidden: delta.hidden,
+              reasoningKey: delta.reasoningKey,
             });
             if (part?.type === 'think' && part.hidden === true) return;
             void this.dispatcher.dispatch(
@@ -2052,6 +2058,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
         durationMs,
         interruptReason,
         stopReason: result.type === 'completed' ? result.stopReason : undefined,
+        traceId,
       }),
     );
     if (error !== undefined) {

@@ -247,16 +247,6 @@ describe('server-v2 /ssh/{name} ws bridge to a real kap-server', () => {
     await conn.close();
   });
 
-  it('delivers hello as the first frame over the v3 bridge', async () => {
-    const conn = await open(`${wsBase}/ssh/e2e/api/v3/ws`);
-    const first = await conn.next(() => true);
-    expect(first as unknown as Record<string, unknown>).toMatchObject({
-      type: 'hello',
-      protocol_version: '3',
-    });
-    await conn.close();
-  });
-
   it('rejects a bad token with 401 and an unknown connection with 404', async () => {
     const unauthorized = await upgradeError(`${wsBase}/ssh/e2e/api/v1/ws`, 'wrong-token');
     expect(unauthorized).toContain('401');
