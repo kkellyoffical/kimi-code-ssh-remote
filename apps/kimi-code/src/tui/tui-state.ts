@@ -36,7 +36,7 @@ import {
 export interface TUIState {
   ui: TUI;
   terminal: ProcessTerminal;
-  transcriptContainer: Container;
+  transcriptContainer: GutterContainer;
   activityContainer: Container;
   todoPanelContainer: Container;
   todoPanel: TodoPanelComponent;
@@ -119,6 +119,9 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
               })
               .catch(() => {});
           },
+          // Clickable pill centered on the transcript's last row while it is
+          // scrolled away from the end.
+          scrollToEndIndicator: () => currentTheme.fg('primary', ' ↓ Jump to bottom '),
         })
       : new TuiMainScreen(terminal);
 
